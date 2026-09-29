@@ -99,17 +99,16 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
                 title: "Caps",
                 systemImage: "gauge.with.dots.needle.67percent",
                 layoutTraits: ShelfWidgetLayoutTraits(
-                    // Four account rows plus a header, each row two lines
-                    // (percentages, then reset/taper). Sized to the content,
-                    // not a stock card height — the last floating gauge this
-                    // fleet shipped was "bigger than it needs to be".
+                    // A header plus at most four one-line account rows (7-day %
+                    // only, Lee 2026-09-29). Sized to the content, not a stock
+                    // card height — the last floating gauge this fleet shipped
+                    // was "bigger than it needs to be".
                     preferredSoloWidth: 300,
                     preferredPairedWidth: 150,
                     // Measured against the offscreen preview render at this
-                    // width: four two-line account rows plus the header end
-                    // around 183pt; 190 leaves a small buffer without the
-                    // dead space a taller fixed height would add.
-                    contentHeight: .fixed(190)
+                    // width: header plus four rows ends at 117pt with 8pt
+                    // insets; 120 leaves a small buffer.
+                    contentHeight: .fixed(120)
                 ),
                 searchKeywords: ["claude", "quota", "usage", "caps"]
             )
@@ -170,38 +169,27 @@ private struct CapsShelfWidget: View {
         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
     }
 
+    // Lee, live 2026-09-29 12:26pm: "My OVERALL % is a little useful, just as is an
+    // overview of the 7d on all available accts". So one line per account whose week
+    // is not spent (7d under 100), showing only its 7-day %. Spent accounts still
+    // count in the header's overall number; they just leave the list.
     private var accountRows: some View {
-        let now = Date()
-        let accounts = capsOrderAccounts(droplet.reading.accounts)
+        let accounts = capsOrderAccounts(droplet.reading.accounts).filter { account in
+            guard let pct = account.sevenDayPct else { return false }
+            return pct < 100
+        }
         return VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
             ForEach(accounts) { account in
-                VStack(alignment: .leading, spacing: 1) {
-                    HStack(spacing: DroppySpacing.xsm) {
-                        Text(capsDisplayName(account.account))
-                            .font(.system(size: 12, weight: .medium))
-                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                            .lineLimit(1)
-                        Spacer(minLength: DroppySpacing.xs)
-                        Text("7d \(capsFormatPercentage(account.sevenDayPct))")
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                        Text("5h \(capsFormatPercentage(account.fiveHourPct))")
-                            .font(.system(size: 11))
-                            .monospacedDigit()
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                    }
-                    let resetLine = "\(capsFormatReset(account.sevenDayReset, now)) · 5h \(capsFormatReset(account.fiveHourReset, now))"
-                    Text(resetLine)
-                        .font(.system(size: 9))
-                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
+                HStack(spacing: DroppySpacing.xsm) {
+                    Text(capsDisplayName(account.account))
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                         .lineLimit(1)
-                    if account.account == "primary" || account.account == "secondary" {
-                        Text(capsFormatTaper(account.releaseDecision, now))
-                            .font(.system(size: 9, weight: .medium))
-                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
-                            .lineLimit(1)
-                    }
+                    Spacer(minLength: DroppySpacing.xs)
+                    Text("7d \(capsFormatPercentage(account.sevenDayPct))")
+                        .font(.system(size: 12))
+                        .monospacedDigit()
+                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
                 }
             }
         }

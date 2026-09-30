@@ -37,6 +37,7 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
 
     private var host: DropletHost?
     private var ticker: AnyCancellable?
+    private var alerts = CapsAlertTracker()
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
 
     @Published private(set) var reading: CapsReading = CapsReading(title: "no reading", accounts: [], hasReading: false)
@@ -46,6 +47,11 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         self.host = host
         refresh()
         host.log.info("Caps activated: \(self.reading.title)")
+        // Preview only: CAPS_PREVIEW_ALERT=1 shows a sample banner so its look
+        // can be checked in the harness. Unset in Droppy, so it never fires there.
+        if ProcessInfo.processInfo.environment["CAPS_PREVIEW_ALERT"] == "1" {
+            capsPresent([CapsAlert(kind: .full, title: "Secondary is full", detail: "Back in 1d 14h")], on: host.hud)
+        }
 
         // Once a minute, matching the brief ("refresh about once a minute").
         // Caps' own snapshot writer runs on its own cadence; this droplet only
@@ -69,8 +75,33 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         reading = next
         codex = CodexReader.load()
         publishActivity()
+        announceChanges()
         // An account coming back or running out changes the card's height.
         if cardHeight != before { host?.shelf.invalidateLayout(for: "fleet") }
+    }
+
+    /// One notch banner per real change (see CapsAlerts.swift). A missing
+    /// reading is not a change: state is only compared between two readings.
+    private func announceChanges() {
+        guard reading.hasReading, let host else { return }
+        let now = Date()
+        var rows = reading.accounts.map { a in
+            CapsAlertTracker.Snapshot(
+                id: a.account, name: capsShortName(a.account),
+                sevenDay: a.sevenDayPct, fiveHour: a.fiveHourPct,
+                released: a.releaseDecision?.released, ceiling: a.releaseDecision?.ceilingPct,
+                reset7: capsUntil(a.sevenDayReset, now), reset5: capsUntil(a.fiveHourReset, now))
+        }
+        if let c = codex {
+            rows.append(CapsAlertTracker.Snapshot(
+                id: "codex", name: "Codex", sevenDay: c.pct, fiveHour: nil,
+                released: nil, ceiling: nil, reset7: capsUntil(c.resetsAt, now), reset5: "–"))
+        }
+        let changes = alerts.update(rows)
+        if !changes.isEmpty {
+            capsPresent(changes, on: host.hud)
+            host.log.info("Caps alert: \(changes.map(\.title).joined(separator: "; "))")
+        }
     }
 
     /// The fleet percentage as a fraction 0...1 for the ring, or nil when
@@ -156,7 +187,7 @@ private extension Font {
     static let capsDetail = Font.system(size: 10)
 }
 
-private func capsShortName(_ account: String) -> String {
+func capsShortName(_ account: String) -> String {
     switch account {
     case "backup": return "Secondary"
     default: return capsDisplayName(account)
@@ -164,12 +195,12 @@ private func capsShortName(_ account: String) -> String {
 }
 
 /// "5d 8h", "14h", "13m": time until a reset, largest two units.
-private func capsUntil(_ raw: String?, _ now: Date) -> String {
+func capsUntil(_ raw: String?, _ now: Date) -> String {
     guard let raw, let date = CapsSnapshotLoader.parseSnapshotTimestamp(raw) ?? ISO8601DateFormatter().date(from: raw) else { return "–" }
     return capsUntil(date, now)
 }
 
-private func capsUntil(_ date: Date, _ now: Date) -> String {
+func capsUntil(_ date: Date, _ now: Date) -> String {
     let s = Int(max(0, date.timeIntervalSince(now)))
     let d = s / 86_400, h = (s % 86_400) / 3_600, m = (s % 3_600) / 60
     if d > 0 { return h > 0 ? "\(d)d \(h)h" : "\(d)d" }

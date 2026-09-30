@@ -1,5 +1,11 @@
 # Changelog
 
+## [1.0.4] - 2026-09-30
+
+- A short banner drops from the notch when an account runs out or comes back, when a budget hold
+  lifts, or when a 5-hour window passes 90%. Each fires once per change and never repeats while
+  the condition holds; starting Droppy fires nothing.
+
 ## [1.0.3] - 2026-09-30
 
 - New card: one bar per account on one scale, with the budget cap drawn as a notch on the bar and

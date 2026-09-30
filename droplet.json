@@ -1,16 +1,18 @@
 {
   "id": "capsdroppy",
   "name": "Caps",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "summary": "The fleet quota Caps already tracks, on the shelf",
-  "description": "Caps reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json -- the same file Caps' menu-bar app and its Bartender line read -- and shows the fleet percentage as a small ring beside the notch, plus a shelf card with every account's 7-day and 5-hour percentages, both reset times, and the budget line for primary and secondary. Read-only, local file, no network, refreshed about once a minute.",
+  "description": "Caps reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json, the same file Caps' menu-bar app and its Bartender line read, plus Codex's own session logs. It shows the fleet percentage as a small ring beside the notch, and a shelf card with one bar per account on one scale: 7-day use, the budget cap as a notch on the bar, 5-hour use, and Codex's weekly use. Spent accounts keep their place and say when they are back. Hover the card to see every reset time. Read-only, local files, no network, refreshed about once a minute.",
   "category": "Productivity",
   "kit": {
     "abi": 1,
     "minAPI": "1.9.0"
   },
   "minAppVersion": "16.0.1",
-  "capabilities": [],
+  "capabilities": [
+    "shelf-write"
+  ],
   "surfaces": [
     "shelf-widget",
     "live-activity"

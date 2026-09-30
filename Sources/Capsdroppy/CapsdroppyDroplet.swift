@@ -122,8 +122,8 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 }
 
-/// The shelf widget: full account table when solo, just the fleet number
-/// when paired (grouped rows are always compact — see `ShelfWidgetContext`).
+/// The shelf widget: the fleet number plus one line per account with room,
+/// in both solo and compact slots (compact drops the "7d" prefix).
 private struct CapsShelfWidget: View {
     @ObservedObject var droplet: CapsdroppyDroplet
     let context: ShelfWidgetContext
@@ -131,14 +131,10 @@ private struct CapsShelfWidget: View {
     var body: some View {
         VStack(alignment: .leading, spacing: DroppySpacing.sm) {
             header
-            if context.isCompact {
-                Spacer(minLength: 0)
-                Text(droplet.reading.title)
-                    .font(.system(size: 24, weight: .semibold, design: .rounded))
-                    .monospacedDigit()
-                    .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
-                Spacer(minLength: 0)
-            } else if !droplet.reading.hasReading {
+            // Lee, live 2026-09-29 5:28pm, on the compact slot showing only a big
+            // repeat of the header's number: "no details at all though, non
+            // optimal design". Both sizes now show the account lines.
+            if !droplet.reading.hasReading {
                 Spacer(minLength: 0)
                 Text("no reading")
                     .font(.system(size: 13))
@@ -186,7 +182,9 @@ private struct CapsShelfWidget: View {
                         .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
                         .lineLimit(1)
                     Spacer(minLength: DroppySpacing.xs)
-                    Text("7d \(capsFormatPercentage(account.sevenDayPct))")
+                    Text(context.isCompact
+                         ? capsFormatPercentage(account.sevenDayPct)
+                         : "7d \(capsFormatPercentage(account.sevenDayPct))")
                         .font(.system(size: 12))
                         .monospacedDigit()
                         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)

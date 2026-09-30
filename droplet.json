@@ -1,9 +1,9 @@
 {
   "id": "capsdroppy",
   "name": "Caps",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "summary": "The fleet quota Caps already tracks, on the shelf",
-  "description": "Caps reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json -- the same file Caps' menu-bar app and its Raycast command read -- and shows the same fleet percentage where Bartender doesn't hide it: a small ring and the number beside the notch, and a full per-account table (7-day and 5-hour percentages, resets, and the primary/secondary taper line) on Droppy's shelf. Read-only, local file, no network, refreshed about once a minute.",
+  "description": "Caps reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json -- the same file Caps' menu-bar app and its Bartender line read -- and shows the fleet percentage as a small ring beside the notch, plus a shelf card with the overall number and each account's 7-day percentage for accounts whose week is not spent. Read-only, local file, no network, refreshed about once a minute.",
   "category": "Productivity",
   "kit": {
     "abi": 1,
@@ -27,5 +27,11 @@
     "license": "MIT"
   },
   "screenshots": [],
-  "keywords": ["claude", "quota", "usage", "caps", "fleet"]
+  "keywords": [
+    "claude",
+    "quota",
+    "usage",
+    "caps",
+    "fleet"
+  ]
 }

@@ -99,16 +99,14 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
                 title: "Caps",
                 systemImage: "gauge.with.dots.needle.67percent",
                 layoutTraits: ShelfWidgetLayoutTraits(
-                    // A header plus at most four one-line account rows (7-day %
-                    // only, Lee 2026-09-29). Sized to the content, not a stock
-                    // card height — the last floating gauge this fleet shipped
-                    // was "bigger than it needs to be".
+                    // A header plus four account rows, each up to three lines
+                    // (percentages, resets, budget line). Sized to the content,
+                    // not a stock card height.
                     preferredSoloWidth: 300,
                     preferredPairedWidth: 150,
-                    // Measured against the offscreen preview render at this
-                    // width: header plus four rows ends at 117pt with 8pt
-                    // insets; 120 leaves a small buffer.
-                    contentHeight: .fixed(120)
+                    // Measured on the offscreen preview render of this layout
+                    // (see the 1.0.0 note: about 183pt); 190 leaves a buffer.
+                    contentHeight: .fixed(190)
                 ),
                 searchKeywords: ["claude", "quota", "usage", "caps"]
             )
@@ -122,8 +120,8 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 }
 
-/// The shelf widget: the fleet number plus one line per account with room,
-/// in both solo and compact slots (compact drops the "7d" prefix).
+/// The shelf widget: the fleet number plus every account's full detail, in
+/// both solo and compact slots.
 private struct CapsShelfWidget: View {
     @ObservedObject var droplet: CapsdroppyDroplet
     let context: ShelfWidgetContext
@@ -165,29 +163,47 @@ private struct CapsShelfWidget: View {
         .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
     }
 
-    // Lee, live 2026-09-29 12:26pm: "My OVERALL % is a little useful, just as is an
-    // overview of the 7d on all available accts". So one line per account whose week
-    // is not spent (7d under 100), showing only its 7-day %. Spent accounts still
-    // count in the header's overall number; they just leave the list.
+    // Every account, with 7-day and 5-hour %, both resets, and the budget line for
+    // primary and secondary. Lee, live 2026-09-29 7:18pm, after a trim to 7-day only:
+    // "Loses a lot of the data I had in our OG app". His 12:26pm note ("just as is
+    // an overview of the 7d") asked for the 7-day overview in addition, not instead.
     private var accountRows: some View {
-        let accounts = capsOrderAccounts(droplet.reading.accounts).filter { account in
-            guard let pct = account.sevenDayPct else { return false }
-            return pct < 100
-        }
+        let now = Date()
+        let accounts = capsOrderAccounts(droplet.reading.accounts)
         return VStack(alignment: .leading, spacing: DroppySpacing.xsm) {
             ForEach(accounts) { account in
-                HStack(spacing: DroppySpacing.xsm) {
-                    Text(capsDisplayName(account.account))
-                        .font(.system(size: 12, weight: .medium))
-                        .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                VStack(alignment: .leading, spacing: 1) {
+                    HStack(spacing: DroppySpacing.xsm) {
+                        Text(capsDisplayName(account.account))
+                            .font(.system(size: 12, weight: .medium))
+                            .foregroundStyle(AdaptiveColors.notchSurfacePrimaryText)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.6)
+                                                    Spacer(minLength: DroppySpacing.xs)
+                        Text("7d \(capsFormatPercentage(account.sevenDayPct))")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                        Text("5h \(capsFormatPercentage(account.fiveHourPct))")
+                            .font(.system(size: 11))
+                            .monospacedDigit()
+                            .lineLimit(1)
+                            .fixedSize()
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    }
+                    let resetLine = "\(capsFormatReset(account.sevenDayReset, now)) · 5h \(capsFormatReset(account.fiveHourReset, now))"
+                    Text(resetLine)
+                        .font(.system(size: 9))
+                        .foregroundStyle(AdaptiveColors.notchSurfaceTertiaryText)
                         .lineLimit(1)
-                    Spacer(minLength: DroppySpacing.xs)
-                    Text(context.isCompact
-                         ? capsFormatPercentage(account.sevenDayPct)
-                         : "7d \(capsFormatPercentage(account.sevenDayPct))")
-                        .font(.system(size: 12))
-                        .monospacedDigit()
-                        .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                    if account.account == "primary" || account.account == "secondary" {
+                        Text(capsFormatTaper(account.releaseDecision, now))
+                            .font(.system(size: 9, weight: .medium))
+                            .foregroundStyle(AdaptiveColors.notchSurfaceSecondaryText)
+                            .lineLimit(1)
+                    }
                 }
             }
         }

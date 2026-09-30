@@ -10,11 +10,11 @@
 //  per the brief's instruction to reuse that logic rather than invent new
 //  rules. Behaviour is meant to match that file value for value, including
 //  its date handling: `generated_at` in the snapshot carries no timezone
-//  offset (e.g. "2026-09-28T16:05:06.669390"), and JavaScript's `Date`
-//  constructor interprets a date-time string with no offset as UTC — verified
-//  with `node -e 'new Date("2026-09-28T16:05:06.669390").toISOString()'`,
-//  which returns the same instant unshifted. `parseUTCTimestamp` below does
-//  the same: it never applies the local (Pacific) offset.
+//  offset (e.g. "2026-09-28T16:05:06.669390") and is written in LOCAL time
+//  (menubar_snapshot.py writes a naive local datetime). JavaScript's `Date`
+//  reads an offset-free date-time as local too. `parseSnapshotTimestamp`
+//  below does the same. It first shipped reading it as UTC, which put every
+//  reading 7 hours in the future and showed "no reading" (Lee, 2026-09-29).
 //
 //  No network. This droplet only ever reads this one local file.
 //
@@ -74,7 +74,7 @@ public enum CapsSnapshotLoader {
             let raw = try? JSONSerialization.jsonObject(with: data),
             let object = raw as? [String: Any],
             let generatedAtRaw = object["generated_at"] as? String,
-            let generatedAt = parseUTCTimestamp(generatedAtRaw),
+            let generatedAt = parseSnapshotTimestamp(generatedAtRaw),
             let accountsRaw = object["accounts"] as? [Any]
         else { return nil }
 
@@ -128,10 +128,9 @@ public enum CapsSnapshotLoader {
 
     /// Parses an ISO 8601 timestamp. If it carries an explicit offset or `Z`,
     /// that offset is honoured. If it carries none (the shape every
-    /// `menubar-snapshot.json` write uses), it is read as UTC — matching
-    /// JavaScript's `Date` constructor, verified against this exact
-    /// millisecond-plus-microsecond shape.
-    static func parseUTCTimestamp(_ raw: String) -> Date? {
+    /// `menubar-snapshot.json` write uses), it is read as local time, the
+    /// same way the writer produced it.
+    static func parseSnapshotTimestamp(_ raw: String) -> Date? {
         if raw.hasSuffix("Z") || raw.dropFirst(10).contains("+") || raw.dropFirst(10).contains("-") {
             let iso = ISO8601DateFormatter()
             iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -146,27 +145,23 @@ public enum CapsSnapshotLoader {
         // microsecond) is accepted without a fixed-width format string.
         let parts = raw.split(separator: "T", maxSplits: 1)
         guard parts.count == 2 else { return nil }
-        let dateFormatter = DateFormatter()
-        dateFormatter.locale = Locale(identifier: "en_US_POSIX")
-        dateFormatter.timeZone = TimeZone(identifier: "UTC")
-        dateFormatter.dateFormat = "yyyy-MM-dd"
-        guard let dayStart = dateFormatter.date(from: String(parts[0])) else { return nil }
-
-        let timeOfDay = String(parts[1])
-        let timeParts = timeOfDay.split(separator: ":")
-        guard timeParts.count == 3,
-              let hour = Int(timeParts[0]),
-              let minute = Int(timeParts[1]) else { return nil }
+        let dateParts = parts[0].split(separator: "-")
+        let timeParts = parts[1].split(separator: ":")
+        guard dateParts.count == 3, timeParts.count == 3,
+              let year = Int(dateParts[0]), let month = Int(dateParts[1]), let day = Int(dateParts[2]),
+              let hour = Int(timeParts[0]), let minute = Int(timeParts[1]) else { return nil }
         let secondsComponent = timeParts[2].split(separator: ".")
         guard let whole = Int(secondsComponent.first ?? "") else { return nil }
         var fraction: Double = 0
         if secondsComponent.count > 1 {
-            let fracString = "0.\(secondsComponent[1])"
-            fraction = Double(fracString) ?? 0
+            fraction = Double("0.\(secondsComponent[1])") ?? 0
         }
-
-        let seconds = Double(hour * 3600 + minute * 60 + whole) + fraction
-        return dayStart.addingTimeInterval(seconds)
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = .current
+        let components = DateComponents(year: year, month: month, day: day,
+                                        hour: hour, minute: minute, second: whole)
+        guard let date = calendar.date(from: components) else { return nil }
+        return date.addingTimeInterval(fraction)
     }
 }
 
@@ -256,7 +251,7 @@ func capsFormatPct(_ value: Double) -> String {
 
 /// Reproduces `formatReset` in snapshot.ts.
 public func capsFormatReset(_ raw: String?, _ now: Date) -> String {
-    guard let raw, let reset = CapsSnapshotLoader.parseUTCTimestamp(raw) ?? ISO8601DateFormatter().date(from: raw) else {
+    guard let raw, let reset = CapsSnapshotLoader.parseSnapshotTimestamp(raw) ?? ISO8601DateFormatter().date(from: raw) else {
         return "reset unknown"
     }
     let seconds = Int(reset.timeIntervalSince(now))

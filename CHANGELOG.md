@@ -1,5 +1,13 @@
 # Changelog
 
+## [1.0.5] - 2026-09-30
+
+- Condensed card: two lines per account. The 5-hour use sits small beside the big 7-day number.
+- The backlog cap is a tick on the bar: bright and tall when backlog work may use the account,
+  dim and short when it is held for client work. A key at the bottom shows both.
+- Hover an account to see its cap and reset times in the bottom line. Nothing on the row moves.
+- A spent account keeps its row: full dim bar, 100%, and when it comes back.
+
 ## [1.0.4] - 2026-09-30
 
 - A short banner drops from the notch when an account runs out or comes back, when a budget hold

@@ -70,7 +70,10 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
 
     private func refresh() {
         let before = cardHeight
-        let snapshot = CapsSnapshotLoader.load(from: capsSnapshotPath)
+        // Preview only: CAPS_PREVIEW_SNAPSHOT points the harness at a fixture so
+        // review renders can show other account states. Unset in Droppy.
+        let path = ProcessInfo.processInfo.environment["CAPS_PREVIEW_SNAPSHOT"] ?? capsSnapshotPath
+        let snapshot = CapsSnapshotLoader.load(from: path)
         let next = capsBuildReading(snapshot, now: Date())
         reading = next
         codex = CodexReader.load()
@@ -152,16 +155,15 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
 
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 
-    /// Exact content height: 8pt host insets top and bottom, the 16pt header,
-    /// 12pt under it, then each row and 12pt between rows. A live account is
-    /// 44 (name 16, bar 8, detail 12, two 4pt gaps), Codex 28 (no detail
-    /// line), a spent account 16. Nothing is padded, so no empty shelf.
+    /// Exact content height: 8pt host insets top and bottom, the 16pt header and
+    /// 8pt under it, then the rows.
     var cardHeight: CGFloat {
         guard reading.hasReading else { return 64 }
-        var rows: [CGFloat] = reading.accounts.map { ($0.sevenDayPct ?? 0) >= 100 ? 16 : 44 }
-        if codex != nil { rows.append(28) }
-        let body = rows.reduce(0, +) + CGFloat(max(0, rows.count - 1)) * 12
-        return 8 + 16 + 12 + body + 8
+        // Every row is 36 (28 of content, 4pt hover margin above and below),
+        // Codex 8 more for its step apart.
+        let rows = CGFloat(reading.accounts.count) * 36 + (codex != nil ? 44 : 0)
+        // Footer: a hairline with 6pt either side, then one 12pt line.
+        return 8 + 16 + 8 + rows + 12.5 + 12 + 8
     }
 }
 
@@ -216,15 +218,6 @@ private func capsAgo(_ date: Date, _ now: Date) -> String {
 
 private func capsWhole(_ v: Double?) -> String { v.map { "\(Int($0.rounded()))" } ?? "–" }
 
-/// "cap 32%, open" (backlog may use up to 32% of the week now) or
-/// "cap 49%, held" (held for client work). Nil when there is no decision.
-private func capsBudget(_ d: CapsReleaseDecision?) -> String? {
-    guard let d, let c = d.ceilingPct, (d.hoursToReset ?? 0) > 0 else { return nil }
-    return "cap \(Int(min(100, max(0, c)).rounded()))%, " + (d.released == true ? "open" : "held")
-}
-
-private func capsBudgetColor(_ d: CapsReleaseDecision?) -> Color { d?.released == true ? t1 : warm }
-
 private func pair(_ label: String, _ value: String, _ valueColor: Color = t2) -> Text {
     Text(label).foregroundColor(t3) + Text(value).foregroundColor(valueColor)
 }
@@ -234,49 +227,45 @@ private func pair(_ label: String, _ value: String, _ valueColor: Color = t2) ->
 /// "92%": number at 16, sign at 10.
 private struct CapsPercent: View {
     let value: String
+    var dim = false
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 2) {
-            Text(value).font(.capsNum).monospacedDigit().foregroundStyle(t1)
+        HStack(alignment: .firstTextBaseline, spacing: 1) {
+            Text(value).font(.capsNum).monospacedDigit().foregroundStyle(dim ? t2 : t1)
             Text("%").font(.capsUnit).foregroundStyle(t2)
         }
     }
 }
 
-/// "5d 8h" built the same way as "92%": numbers at 16, unit letters at 10.
-private struct CapsDuration: View {
-    let text: String
+/// The budget tick, drawn the same wherever it appears. Open (backlog may use
+/// the account now): bright and 12pt, overhanging the bar. Held (saved for client
+/// work): dim and 8pt, inside the bar. Shape and brightness both carry the state.
+private struct CapsTick: View {
+    let open: Bool
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 4) {
-            ForEach(Array(text.split(separator: " ").enumerated()), id: \.offset) { _, part in
-                HStack(alignment: .firstTextBaseline, spacing: 2) {
-                    Text(String(part.prefix { $0.isNumber })).font(.capsNum).monospacedDigit().foregroundStyle(t1)
-                    Text(String(part.drop { $0.isNumber })).font(.capsUnit).foregroundStyle(t2)
-                }
-            }
-        }
+        Capsule().fill(open ? t1 : Color.white.opacity(0.6)).frame(width: 2, height: open ? 12 : 8)
     }
 }
 
-/// The budget mark. Drawn the same on the bar and at the head of its sentence.
-private struct CapsNotch: View {
-    let color: Color
-    var body: some View { Capsule().fill(color).frame(width: 2, height: 12) }
-}
-
-/// 7-day bar, full width, 8pt. The notch cuts through it and overhangs 2pt.
+/// 7-day bar, full width, 8pt, with the budget tick cut into it. The cut is a
+/// real gap in the bar, not black paint, so it reads on any background.
 private struct CapsMeter: View {
-    let pct: Double; let ceiling: Double?; let mark: Color
+    let pct: Double; let ceiling: Double?; let open: Bool
     var body: some View {
         GeometryReader { g in
             let w = g.size.width
             ZStack(alignment: .leading) {
-                Capsule().fill(Color.white.opacity(0.12)).frame(height: 8)
-                if pct > 0 {
-                    Capsule().fill(tone(pct)).frame(width: max(4, w * min(1, pct / 100)), height: 8)
+                ZStack(alignment: .leading) {
+                    Capsule().fill(Color.white.opacity(0.12)).frame(height: 8)
+                    if pct > 0 {
+                        Capsule().fill(tone(pct)).frame(width: max(4, w * min(1, pct / 100)), height: 8)
+                    }
+                    if let c = ceiling, c > 0, c < 100 {
+                        Rectangle().frame(width: 4, height: 8).offset(x: w * c / 100 - 2).blendMode(.destinationOut)
+                    }
                 }
+                .compositingGroup()
                 if let c = ceiling, c > 0, c < 100 {
-                    Rectangle().fill(Color.black).frame(width: 4, height: 12).offset(x: w * c / 100 - 2)
-                    CapsNotch(color: mark).offset(x: w * c / 100 - 1)
+                    CapsTick(open: open).offset(x: w * c / 100 - 1)
                 }
             }
         }
@@ -284,90 +273,96 @@ private struct CapsMeter: View {
     }
 }
 
-/// One live account. Rest: name and 7-day %, bar, budget and 5-hour %.
-/// Hover: every number becomes the time until its window resets, in place.
+/// One account row, 28pt: name, small gray slot and big 7-day number, then the
+/// bar. Nothing on a row moves on hover; hovering only lights the row and puts
+/// its details in the card's bottom line.
 private struct CapsRow: View {
+    let id: String
     let name: String; let pct: Double; let fivePct: Double?
-    let ceiling: Double?; let mark: Color; let budget: String?
-    let reset7: String; let reset5: String?; let age: String?
-    let hover: Bool
+    let ceiling: Double?; let open: Bool
+    var spentBack: String? = nil
+    var readAge: String? = nil
+    @Binding var hovered: String?
+    var compact = false
 
     var body: some View {
+        let lit = hovered == id
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
-                Text(name).font(.capsName).foregroundStyle(t1).lineLimit(1)
-                if let age, !hover { Text(" · \(age)").font(.capsDetail).foregroundStyle(t3) }
+                Text(name).font(.capsName).foregroundStyle(spentBack == nil ? t1 : t2).lineLimit(1)
                 Spacer(minLength: 8)
-                if hover { CapsDuration(text: reset7) } else { CapsPercent(value: capsWhole(pct)) }
+                small.font(.capsDetail).monospacedDigit().lineLimit(1).padding(.trailing, 8)
+                // A fixed number column, so every small slot ends on one edge.
+                CapsPercent(value: capsWhole(pct), dim: spentBack != nil)
+                    .frame(width: compact ? nil : 44, alignment: .trailing)
             }
             .frame(height: 16)
-            CapsMeter(pct: pct, ceiling: ceiling, mark: mark)
-            if fivePct != nil || budget != nil {
-                HStack(alignment: .center, spacing: 0) {
-                    if let budget {
-                        HStack(alignment: .center, spacing: 4) {
-                            CapsNotch(color: mark)
-                            Text(budget).font(.capsDetail).foregroundStyle(mark)
-                        }
-                    }
-                    Spacer(minLength: 8)
-                    if let fivePct {
-                        // One shape in both states: "5h · 30%" at rest, "5h · 14m" on hover.
-                        hover ? pair("5h · ", reset5 ?? "–") : pair("5h · ", "\(capsWhole(fivePct))%", fiveTone(fivePct))
-                    }
-                }
-                .font(.capsDetail).monospacedDigit().lineLimit(1)
-                .frame(height: 12, alignment: .center)
+            if spentBack != nil {
+                Capsule().fill(hot.opacity(0.55)).frame(height: 8)
+            } else {
+                CapsMeter(pct: pct, ceiling: ceiling, open: open)
             }
         }
-    }
-}
-
-/// A spent account keeps its place: name dimmed, when it comes back.
-private struct CapsSpentRow: View {
-    let name: String; let back: String
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 0) {
-            Text(name).font(.capsName).foregroundStyle(t3).lineLimit(1)
-            Spacer(minLength: 8)
-            pair("back ", back).font(.capsDetail).monospacedDigit().lineLimit(1)
-            Text("0").font(.capsNum).hidden().frame(width: 0)   // share the 16pt baseline
+        // 4pt hover margin above and below, so moving down the list never
+        // falls into a dead gap between rows.
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.white.opacity(lit ? 0.11 : 0))
+                .padding(.horizontal, -4)
+        )
+        .contentShape(Rectangle())
+        .onHover { inside in
+            if inside { hovered = id } else if hovered == id { hovered = nil }
         }
-        .frame(height: 16)
+        .animation(.easeOut(duration: 0.12), value: lit)
+    }
+
+    /// The same kind of fact on every row: 5-hour use, or when a spent week
+    /// comes back, or how old Codex's reading is.
+    private var small: Text {
+        if let spentBack { return pair("back in ", spentBack) }
+        if let fivePct { return pair("5h ", "\(capsWhole(fivePct))%", fiveTone(fivePct)) }
+        if let readAge { return pair("read ", readAge) }
+        return Text("")
     }
 }
 
 private struct CapsShelfWidget: View {
     @ObservedObject var droplet: CapsdroppyDroplet
     let context: ShelfWidgetContext
-    @State private var hover = false
+    @State private var hovered: String?
+
+    /// Preview only: CAPS_PREVIEW_HOVER=<account> renders with that row hovered,
+    /// since the harness cannot hover. Unset in Droppy.
+    private let previewHover = ProcessInfo.processInfo.environment["CAPS_PREVIEW_HOVER"]
 
     var body: some View {
         let now = Date()
+        let accounts = capsOrderAccounts(droplet.reading.accounts)
         VStack(alignment: .leading, spacing: 0) {
-            header.padding(.bottom, 12)
+            header.padding(.bottom, 8)
             if droplet.reading.hasReading {
-                VStack(alignment: .leading, spacing: 12) {
-                    ForEach(capsOrderAccounts(droplet.reading.accounts)) { a in
-                        if (a.sevenDayPct ?? 0) >= 100 {
-                            CapsSpentRow(name: capsShortName(a.account), back: capsUntil(a.sevenDayReset, now))
-                        } else {
-                            CapsRow(
-                                name: capsShortName(a.account), pct: a.sevenDayPct ?? 0, fivePct: a.fiveHourPct,
-                                ceiling: a.releaseDecision?.ceilingPct, mark: capsBudgetColor(a.releaseDecision),
-                                budget: capsBudget(a.releaseDecision),
-                                reset7: capsUntil(a.sevenDayReset, now), reset5: capsUntil(a.fiveHourReset, now),
-                                age: nil, hover: hover
-                            )
-                        }
-                    }
-                    if let c = droplet.codex {
-                        CapsRow(
-                            name: "Codex", pct: c.pct, fivePct: nil, ceiling: nil, mark: .clear, budget: nil,
-                            reset7: capsUntil(c.resetsAt, now), reset5: nil, age: capsAgo(c.seenAt, now), hover: hover
-                        )
-                    }
+                ForEach(accounts) { a in
+                    let spent = (a.sevenDayPct ?? 0) >= 100
+                    CapsRow(
+                        id: a.account, name: capsShortName(a.account), pct: a.sevenDayPct ?? 0,
+                        fivePct: a.fiveHourPct, ceiling: a.releaseDecision?.ceilingPct,
+                        open: a.releaseDecision?.released == true,
+                        spentBack: spent ? capsUntil(a.sevenDayReset, now) : nil,
+                        hovered: $hovered, compact: context.isCompact
+                    )
                 }
+                if let c = droplet.codex {
+                    // Codex is not in the Claude average above, so it sits a step apart.
+                    CapsRow(
+                        id: "codex", name: "Codex", pct: c.pct, fivePct: nil, ceiling: nil, open: false,
+                        readAge: capsAgo(c.seenAt, now), hovered: $hovered, compact: context.isCompact
+                    )
+                    .padding(.top, 8)
+                }
+                Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).padding(.top, 4).padding(.bottom, 8)
+                footer(accounts: accounts, now: now)
             } else {
                 Text("no reading").font(.capsDetail).foregroundStyle(t3)
             }
@@ -376,9 +371,7 @@ private struct CapsShelfWidget: View {
         // The one padding every widget applies: the host's corner clearance.
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-        .contentShape(Rectangle())
-        .onHover { hover = $0 }
-        .animation(.easeOut(duration: 0.15), value: hover)
+        .onAppear { if let previewHover { hovered = previewHover } }
     }
 
     private var header: some View {
@@ -388,18 +381,91 @@ private struct CapsShelfWidget: View {
                 .offset(x: -1).frame(width: 16, alignment: .leading)
             Text("Caps").font(.capsName).foregroundStyle(t2).padding(.leading, 4)
             Spacer(minLength: 8)
-            if hover {
-                // Names the mode every number below has switched into.
-                Text("reset times").font(.capsDetail).foregroundStyle(t3)
-                Text("0").font(.capsNum).hidden().frame(width: 0)
-            } else if droplet.reading.hasReading {
-                Text("avg 7d").font(.capsDetail).foregroundStyle(t3).padding(.trailing, 4)
-                CapsPercent(value: droplet.reading.title.replacingOccurrences(of: "%", with: ""))
+            if droplet.reading.hasReading {
+                Text(context.isCompact ? "7d avg " : "7d, all accounts ").font(.capsDetail).foregroundStyle(t3)
+                HStack(alignment: .firstTextBaseline, spacing: 1) {
+                    Text(droplet.reading.title.replacingOccurrences(of: "%", with: ""))
+                        .font(.capsName).monospacedDigit().foregroundStyle(t2)
+                    Text("%").font(.capsUnit).foregroundStyle(t3)
+                }
             }
         }
         .frame(height: 16)
     }
+
+    /// The card's last line. At rest it is the key to the one mark with no
+    /// words and says that rows have more; on hover it is that row's details.
+    /// One fixed 12pt line (shorter wording in the narrow slot), so the card never moves.
+    @ViewBuilder
+    private func footer(accounts: [CapsAccount], now: Date) -> some View {
+        let compact = context.isCompact
+        let lit = hovered != nil
+        return HStack(alignment: .center, spacing: 4) {
+            if let id = hovered, id == "codex", let c = droplet.codex {
+                tickSlot(nil)
+                (Text(compact ? "" : "Codex · ").foregroundColor(t1)
+                 + Text("not in the average").foregroundColor(t2)
+                 + Text("  7d resets in \(capsUntil(c.resetsAt, now))").foregroundColor(t3))
+            } else if let id = hovered, let a = accounts.first(where: { $0.account == id }) {
+                detail(a, now: now, compact: compact)
+            } else {
+                // The key: both ticks exactly as they sit on a bar.
+                specimen(open: true)
+                Text("backlog open").foregroundStyle(t3)
+                specimen(open: false).padding(.leading, 8)
+                Text(compact ? "held" : "held for clients").foregroundStyle(t3)
+                if !compact { Text("· hover a row").foregroundStyle(t3).padding(.leading, 4) }
+            }
+            Spacer(minLength: 0)
+        }
+        .font(.capsDetail)
+        .monospacedDigit()
+        .lineLimit(1)
+        .frame(height: 12)
+        .background(
+            // The same wash as the hovered row, so the two read as one.
+            RoundedRectangle(cornerRadius: 4, style: .continuous)
+                .fill(Color.white.opacity(lit ? 0.11 : 0))
+                .padding(.horizontal, -4).padding(.vertical, -4)
+        )
+    }
+
+    /// A 16pt piece of bar with its tick, for the key.
+    private func specimen(open: Bool) -> some View {
+        CapsMeter(pct: 0, ceiling: 50, open: open).frame(width: 16)
+    }
+
+    /// The head of every footer line: the tick on its 16pt piece of bar, or the
+    /// same space left empty, so footer text always starts at one x.
+    @ViewBuilder private func tickSlot(_ open: Bool?) -> some View {
+        if let open { specimen(open: open) } else { Color.clear.frame(width: 16, height: 8) }
+    }
+
+    @ViewBuilder
+    private func detail(_ a: CapsAccount, now: Date, compact: Bool) -> some View {
+        let name = Text(compact ? "" : "\(capsShortName(a.account)) · ").foregroundColor(t1)
+        if (a.sevenDayPct ?? 0) >= 100 {
+            tickSlot(nil)
+            (name + Text("7d used up").foregroundColor(t2)
+             + Text("  back in \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3))
+        } else {
+            // Two groups, 2 spaces apart: the budget, then when each window resets.
+            let times = compact
+                ? Text("  resets \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3)
+                : Text("  7d resets in \(capsUntil(a.sevenDayReset, now)) · 5h in \(capsUntil(a.fiveHourReset, now))").foregroundColor(t3)
+            if let d = a.releaseDecision, let c = d.ceilingPct, (d.hoursToReset ?? 0) > 0 {
+                let cap = Int(min(100, max(0, c)).rounded())
+                tickSlot(d.released == true)
+                (name + Text("\(d.released == true ? "open" : "held") · cap \(cap)%").foregroundColor(t2)
+                 + times)
+            } else {
+                tickSlot(nil)
+                (name + Text("no cap").foregroundColor(t2) + times)
+            }
+        }
+    }
 }
+
 
 // MARK: - Live activity (the compact state: a small gauge and the fleet %)
 

@@ -2,13 +2,13 @@
 //  CapsdroppyDroplet.swift
 //  Capsdroppy
 //
-//  Caps' fleet-quota reading, on Droppy's shelf and beside the notch.
+//  Caps: how much of your Claude and Codex limits you have used, on Droppy's
+//  shelf and beside the notch.
 //
-//  Reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json and the
-//  last few days of Codex session logs (~/.codex/sessions), on a 60-second
-//  timer. No network, no writes. The parsing and
-//  formatting rules live in CapsSnapshot.swift, a direct port of
-//  /Users/lee/Sites/caps-raycast/src/snapshot.ts (see that file's header).
+//  Numbers come from up to three sources (see UsageSource.swift): Codex's own
+//  session logs, Claude through the Claude Code login saved on this Mac (opt-in,
+//  ClaudeUsage.swift), and an optional snapshot file (Advanced setting). The
+//  droplet reads; it never writes outside Droppy's own preferences.
 //
 
 import Combine
@@ -24,11 +24,33 @@ public final class CapsdroppyPrincipal: NSObject, DropletPrincipal {
     @MainActor public func makeDroplet() -> AnyObject { CapsdroppyDroplet() }
 }
 
-/// The path this droplet reads. Never written to, never anything else.
-let capsSnapshotPath = "/Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json"
+/// Preview only (the harness cannot see a real Mac's accounts). Each variable is
+/// unset in Droppy, so none of these does anything there:
+///   CAPS_PREVIEW_SNAPSHOT  a snapshot file to read, as the Advanced setting would
+///   CAPS_PREVIEW_HOME      a folder to look for Codex homes in, instead of the real home
+///   CAPS_PREVIEW_KEYCHAIN  comma-separated Claude keychain service names to list; the
+///                          keychain is never touched and no request is sent
+///   CAPS_PREVIEW_OPTIN=1   the Claude switch on
+///   CAPS_PREVIEW_ONBOARDED=1  the welcome dismissed
+///   CAPS_PREVIEW_ALERT=1   a sample banner
+///   CAPS_PREVIEW_HOVER     an account id to render hovered
+private let previewEnv = ProcessInfo.processInfo.environment
 
-/// Caps' fleet quota, read from the same snapshot file Caps and the Raycast
-/// command already read.
+/// A keychain that lists the names it is told and holds a login that cannot
+/// report usage, so a preview never touches the real keychain or the network.
+private struct PreviewKeychain: KeychainReading {
+    var services: [String]
+    func claudeServices() -> [String] { services }
+    func credentials(service: String) -> KeychainResult {
+        .found(Data(#"{"claudeAiOauth":{"accessToken":"preview","scopes":["user:inference"]}}"#.utf8))
+    }
+}
+
+private struct NoNetwork: HTTPFetching {
+    func get(_ request: URLRequest) async throws -> HTTPReply { throw URLError(.notConnectedToInternet) }
+}
+
+/// Caps' usage readings, from every source the user has switched on.
 @MainActor
 public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     /// Must equal `DroppyDropletID` in the bundle's Info.plist and `id` in
@@ -42,30 +64,63 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
 
     private var settingsSub: AnyCancellable?
     private var tickerSeconds: TimeInterval = 0
+    private var fetchKey: CapsSettings.FetchKey?
     @Published private(set) var settings = CapsSettings()
 
+    /// What the card draws: enabled accounts, ordered. `hasReading` means a total exists.
     @Published private(set) var reading: CapsReading = CapsReading(title: "no reading", accounts: [], hasReading: false)
-    @Published private(set) var codex: CodexReading?
+    /// Found on this Mac, shown in settings whether or not they are switched on.
+    @Published private(set) var codexHomes: [CodexHome] = []
+    @Published private(set) var claudeServices: [String] = []
+    /// True when any account carries a release_decision (a snapshot with budget holds).
+    @Published private(set) var hasBudgetHolds = false
+
+    private var snapshotAccounts: [CapsAccount] = []
+    private var codexAccounts: [CapsAccount] = []
+    private var claudeAccounts: [CapsAccount] = []
+    private var knownIDs = Set<String>()
+    private var lastDiscovery = Date.distantPast
+    private var claudeTask: Task<Void, Never>?
+
+    private let keychain: any KeychainReading
+    private let claude: ClaudeKeychainSource
+    private let homeDirectory: URL
+
+    public override init() {
+        let preview = previewEnv["CAPS_PREVIEW_KEYCHAIN"]
+        let list = preview.map { $0.split(separator: ",").map { String($0).trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty } }
+        let keychain: any KeychainReading = list.map { PreviewKeychain(services: $0) } ?? SystemKeychain()
+        let version = (Bundle(for: CapsdroppyPrincipal.self).infoDictionary?["CFBundleShortVersionString"] as? String) ?? "1"
+        self.keychain = keychain
+        self.claude = ClaudeKeychainSource(keychain: keychain, http: preview == nil ? SystemHTTP() : NoNetwork(), version: version)
+        self.homeDirectory = previewEnv["CAPS_PREVIEW_HOME"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser
+        super.init()
+    }
 
     public func activate(host: DropletHost) throws {
         self.host = host
-        settings = CapsSettings.load(from: host.preferences)
-        refresh()
+        settings = loadSettings()
+        fetchKey = settings.fetchKey
+        refresh(discover: true)
         host.log.info("Caps activated: \(self.reading.title)")
-        // Preview only: CAPS_PREVIEW_ALERT=1 shows a sample banner so its look
-        // can be checked in the harness. Unset in Droppy, so it never fires there.
-        if ProcessInfo.processInfo.environment["CAPS_PREVIEW_ALERT"] == "1" {
-            capsPresent([CapsAlert(kind: .full, title: "Secondary is full", detail: "Back in 1d 14h")], on: host.hud)
+        if previewEnv["CAPS_PREVIEW_ALERT"] == "1" {
+            capsPresent([CapsAlert(kind: .full, title: "Claude is full", detail: "Back in 1d 14h")], on: host.hud)
         }
 
-        // Once a minute, matching the brief ("refresh about once a minute").
-        // Caps' own snapshot writer runs on its own cadence; this droplet only
-        // ever reads, never polls faster than it needs to.
+        // About once a minute by default; the refresh setting changes it.
         scheduleTicker()
         // A change from the settings pane (or anywhere else) applies at once.
         settingsSub = host.preferences.didChange
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.settingsChanged() }
+    }
+
+    private func loadSettings() -> CapsSettings {
+        var s = CapsSettings.load(from: host?.preferences)
+        if previewEnv["CAPS_PREVIEW_OPTIN"] == "1" { s.claudeOptIn = true }
+        if previewEnv["CAPS_PREVIEW_ONBOARDED"] == "1" { s.onboarded = true }
+        if let path = previewEnv["CAPS_PREVIEW_SNAPSHOT"] { s.snapshotPath = path }
+        return s
     }
 
     /// Writes one setting and applies it.
@@ -76,14 +131,52 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         if next != settings { settings = next; settingsChanged() }
     }
 
-    private func settingsChanged() {
-        guard let host else { return }
-        settings = CapsSettings.load(from: host.preferences)
-        scheduleTicker()
-        refresh()
+    func setAccountEnabled(_ id: String, _ on: Bool) {
+        var map = settings.accountEnabled
+        map[id] = on
+        setSetting(.accountEnabled, \.accountEnabled, map)
     }
 
-    /// Default every 60 seconds, matching the brief ("refresh about once a minute").
+    func setAccountName(_ id: String, _ name: String) {
+        var map = settings.accountNames
+        map[id] = name.isEmpty ? nil : name
+        setSetting(.accountNames, \.accountNames, map)
+    }
+
+    /// Adds a Codex folder. Returns a sentence when it cannot, nil when it worked.
+    @discardableResult
+    func addCodexFolder(_ raw: String) -> String? {
+        let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        let path = URL(fileURLWithPath: (text as NSString).expandingTildeInPath).standardizedFileURL.path
+        guard CodexReader.hasSessions(URL(fileURLWithPath: path)) else {
+            return "That folder has no sessions folder in it, so it is not a Codex home."
+        }
+        if codexHomes.contains(where: { $0.path == path }) { return "Already in the list." }
+        setSetting(.codexFolders, \.codexFolders, settings.codexFolders + [path])
+        return nil
+    }
+
+    func removeCodexFolder(_ path: String) {
+        setSetting(.codexFolders, \.codexFolders, settings.codexFolders.filter { $0 != path })
+    }
+
+    private func settingsChanged() {
+        guard host != nil else { return }
+        settings = loadSettings()
+        scheduleTicker()
+        let key = settings.fetchKey
+        if key != fetchKey {
+            // What is read changed: read again. Switching Claude off forgets its readings at once.
+            let optInChanged = key.claudeOptIn != fetchKey?.claudeOptIn
+            fetchKey = key
+            refresh(discover: optInChanged)
+        } else {
+            // A name or an alert level: nothing to fetch, just redraw.
+            rebuild()
+        }
+    }
+
     private func scheduleTicker() {
         let seconds = settings.effectiveRefresh
         guard ticker == nil || seconds != tickerSeconds else { return }
@@ -98,43 +191,87 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         ticker = nil
         settingsSub?.cancel()
         settingsSub = nil
+        claudeTask?.cancel()
+        claudeTask = nil
+        let claude = claude
+        Task { await claude.reset() }
         activitySubject.send(nil)
         host = nil
     }
 
-    private func refresh() {
+    // MARK: Reading
+
+    /// One reading from every source. The file sources are read here; Claude's
+    /// request runs off the main thread and lands in `rebuild()` when it returns.
+    private func refresh(discover: Bool = false) {
+        let now = Date()
+        let s = settings
+        codexHomes = CodexReader.homes(added: s.codexFolders, home: homeDirectory)
+        snapshotAccounts = SnapshotFileSource(path: s.snapshotPath).readNow(now: now)
+        let homes = s.showCodex ? codexHomes.filter { s.isEnabled($0.accountID) } : []
+        codexAccounts = CodexLogSource(homes: homes).readNow(now: now)
+        rebuild()
+        refreshClaude(discover: discover || now.timeIntervalSince(lastDiscovery) > 300)
+    }
+
+    /// Lists the Claude Code logins (names only), and, when the user has opted
+    /// in, reads usage for the enabled ones.
+    private func refreshClaude(discover: Bool) {
+        claudeTask?.cancel()
+        let keychain = keychain, claude = claude
+        let optIn = settings.claudeOptIn
+        claudeTask = Task { [weak self] in
+            if discover {
+                let found = await Task.detached(priority: .utility) { keychain.claudeServices() }.value
+                guard let self, !Task.isCancelled else { return }
+                self.claudeServices = found
+                self.lastDiscovery = Date()
+            }
+            guard let self, !Task.isCancelled else { return }
+            guard optIn else {
+                await claude.reset()
+                if !self.claudeAccounts.isEmpty { self.claudeAccounts = []; self.rebuild() }
+                return
+            }
+            let s = self.settings
+            let services = self.claudeServices.filter { s.isEnabled(capsClaudeAccountID($0)) }
+            await claude.configure(services: services, refresh: s.effectiveRefresh)
+            let rows = await claude.read(now: Date())
+            guard !Task.isCancelled else { return }
+            self.claudeAccounts = rows
+            self.rebuild()
+        }
+    }
+
+    /// Puts the latest readings together: enabled accounts, in order, with the
+    /// total. Cheap, so a rename can call it without fetching anything.
+    private func rebuild() {
         let before = cardHeight
-        // Preview only: CAPS_PREVIEW_SNAPSHOT points the harness at a fixture so
-        // review renders can show other account states. Unset in Droppy.
-        let path = ProcessInfo.processInfo.environment["CAPS_PREVIEW_SNAPSHOT"] ?? capsSnapshotPath
-        let snapshot = CapsSnapshotLoader.load(from: path)
-        let next = capsBuildReading(snapshot, now: Date())
-        reading = next
-        codex = settings.showCodex ? CodexReader.load() : nil
+        let enabled = (snapshotAccounts + claudeAccounts + codexAccounts).filter { settings.isEnabled($0.account) }
+        reading = capsBuildReading(accounts: capsOrderAccounts(enabled))
+        hasBudgetHolds = reading.accounts.contains { $0.releaseDecision?.ceilingPct != nil }
         publishActivity()
         announceChanges()
-        // An account coming back or running out changes the card's height.
+        // An account coming or going changes the card's height.
         if cardHeight != before { host?.shelf.invalidateLayout(for: "fleet") }
     }
 
     /// One notch banner per real change (see CapsAlerts.swift). A missing
     /// reading is not a change: state is only compared between two readings.
     private func announceChanges() {
-        guard reading.hasReading, let host else { return }
+        guard let host else { return }
         let now = Date()
-        var rows = reading.accounts.map { a in
+        let rows = reading.accounts.filter { $0.hasNumbers }.map { a in
             CapsAlertTracker.Snapshot(
-                id: a.account, name: capsShortName(a.account),
+                id: a.account, name: settings.name(for: a),
                 sevenDay: a.sevenDayPct, fiveHour: a.fiveHourPct,
                 released: a.releaseDecision?.released, ceiling: a.releaseDecision?.ceilingPct,
                 reset7: capsUntil(a.sevenDayReset, now), reset5: capsUntil(a.fiveHourReset, now))
         }
-        if let c = codex {
-            rows.append(CapsAlertTracker.Snapshot(
-                id: "codex", name: "Codex", sevenDay: c.pct, fiveHour: nil,
-                released: nil, ceiling: nil, reset7: capsUntil(c.resetsAt, now), reset5: "–"))
-        }
-        if codex == nil { alerts.forget("codex") }
+        // An account that went away reads as new when it returns, so nothing stale fires.
+        let ids = Set(rows.map(\.id))
+        for gone in knownIDs.subtracting(ids) { alerts.forget(gone) }
+        knownIDs = ids
         // The tracker records every change; settings only decide what is shown.
         let changes = settings.filter(
             alerts.update(rows, fiveHourThreshold: settings.fiveHourThreshold, rearm: settings.effectiveRearm))
@@ -144,25 +281,26 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         }
     }
 
-    /// The fleet percentage as a fraction 0...1 for the ring, or nil when
-    /// there is no reading to draw.
-    var fleetFraction: Double? {
-        guard reading.hasReading,
-              let value = Double(reading.title.replacingOccurrences(of: "%", with: ""))
-        else { return nil }
-        return min(1, max(0, value / 100))
+    /// The total as a fraction 0...1 for the ring, or nil when there is no total.
+    var totalFraction: Double? {
+        guard let total = capsTotal(reading.accounts) else { return nil }
+        return min(1, max(0, total / 100))
     }
 
     /// Same 70/90 thresholds `accountSeverity` in snapshot.ts uses for a
-    /// single account's severity, applied here to the fleet average so the
-    /// ring's color means the same thing Caps' own coloring does: green under
-    /// 70, amber 70..<90, red 90+.
-    var fleetTint: Color {
-        guard let fraction = fleetFraction else { return AdaptiveColors.notchSurfaceTertiaryText }
+    /// single account's severity: green under 70, amber 70..<90, red 90+.
+    var totalTint: Color {
+        guard let fraction = totalFraction else { return AdaptiveColors.notchSurfaceTertiaryText }
         let pct = fraction * 100
         if pct >= 90 { return .red }
         if pct >= 70 { return .orange }
         return .green
+    }
+
+    /// Codex has its own limits, so it is left out of the total whenever a
+    /// Claude account has a number.
+    var codexIsOutsideTotal: Bool {
+        reading.accounts.contains { $0.kind != .codex && $0.sevenDayPct != nil }
     }
 }
 
@@ -172,6 +310,7 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
     public var widgetDescriptors: [ShelfWidgetDescriptor] {
         [
             ShelfWidgetDescriptor(
+                // The id stays "fleet": it is the key Droppy keeps a user's shelf layout under.
                 id: "fleet",
                 title: "Caps",
                 systemImage: "gauge.with.dots.needle.67percent",
@@ -181,7 +320,7 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
                     // Sized to the rows actually showing; see cardHeight.
                     contentHeight: .fixed(cardHeight)
                 ),
-                searchKeywords: ["claude", "quota", "usage", "caps", "codex"]
+                searchKeywords: ["claude", "quota", "usage", "caps", "codex", "limit"]
             )
         ]
     }
@@ -192,13 +331,17 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
 
     public func makeWidgetSettingsPopover(_ id: ShelfWidgetID) -> AnyView? { nil }
 
+    /// Opens this droplet's settings, for the empty card's button.
+    func openSettings() { _ = host?.workspace.openSettings() }
+
     /// Exact content height: 8pt host insets top and bottom, the 16pt header and
-    /// 8pt under it, then the rows.
+    /// 8pt under it, then the rows (or the empty state).
     var cardHeight: CGFloat {
-        guard reading.hasReading else { return 64 }
+        guard !reading.accounts.isEmpty else { return 8 + 16 + 8 + 12 + 8 + 22 + 8 }
         // Every row is 36 (28 of content, 4pt hover margin above and below),
-        // Codex 8 more for its step apart.
-        let rows = CGFloat(reading.accounts.count) * 36 + (codex != nil ? 44 : 0)
+        // and Codex steps 8 apart from the Claude rows above it.
+        let kinds = Set(reading.accounts.map { $0.kind == .codex })
+        let rows = CGFloat(reading.accounts.count) * 36 + (kinds.count == 2 ? 8 : 0)
         // Footer: a hairline with 6pt either side, then one 12pt line.
         return 8 + 16 + 8 + rows + 12.5 + 12 + 8
     }
@@ -310,13 +453,40 @@ private struct CapsMeter: View {
     }
 }
 
+/// Short words for an account that has no numbers, in the row's small slot.
+func capsStateShort(_ state: CapsAccountState) -> String? {
+    switch state {
+    case .ok: return nil
+    case .pending: return "reading"
+    case .noUsageScope: return "can't report usage"
+    case .loginExpired: return "login expired"
+    case .accessDenied: return "access not allowed"
+    case .unreachable: return "retrying"
+    case .noActivity: return "no recent use"
+    }
+}
+
+/// The same, as a sentence, for the card's bottom line.
+func capsStateLong(_ state: CapsAccountState, compact: Bool) -> String {
+    switch state {
+    case .ok: return ""
+    case .pending: return "Reading…"
+    case .noUsageScope: return compact ? "This login can't report usage" : "This login can't report usage. Sign in to Claude Code again."
+    case .loginExpired: return compact ? "Login expired" : "Login expired. Claude Code renews it when you use it."
+    case .accessDenied: return compact ? "macOS didn't allow access" : "macOS didn't allow access. Turn Claude off and on in settings to be asked again."
+    case .unreachable: return compact ? "Can't reach Anthropic" : "Can't reach Anthropic. Trying again shortly."
+    case .noActivity: return compact ? "No recent Codex use" : "No recent Codex use to read yet."
+    }
+}
+
 /// One account row, 28pt: name, small gray slot and big 7-day number, then the
 /// bar. Nothing on a row moves on hover; hovering only lights the row and puts
 /// its details in the card's bottom line.
 private struct CapsRow: View {
     let id: String
-    let name: String; let pct: Double; let fivePct: Double?
+    let name: String; let pct: Double?; let fivePct: Double?
     let ceiling: Double?; let open: Bool
+    var state: CapsAccountState = .ok
     var spentBack: String? = nil
     var readAge: String? = nil
     @Binding var hovered: String?
@@ -324,20 +494,26 @@ private struct CapsRow: View {
 
     var body: some View {
         let lit = hovered == id
+        // A window with only a 5-hour reading leads with that number.
+        let big = pct ?? fivePct
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
-                Text(name).font(.capsName).foregroundStyle(spentBack == nil ? t1 : t2).lineLimit(1)
+                Text(name).font(.capsName).foregroundStyle(spentBack == nil && big != nil ? t1 : t2).lineLimit(1)
                 Spacer(minLength: 8)
-                small.font(.capsDetail).monospacedDigit().lineLimit(1).padding(.trailing, 8)
+                small.font(.capsDetail).monospacedDigit().lineLimit(1).padding(.trailing, big == nil ? 0 : 8)
                 // A fixed number column, so every small slot ends on one edge.
-                CapsPercent(value: capsWhole(pct), dim: spentBack != nil)
-                    .frame(width: compact ? nil : 44, alignment: .trailing)
+                if big != nil {
+                    CapsPercent(value: capsWhole(big), dim: spentBack != nil)
+                        .frame(width: compact ? nil : 44, alignment: .trailing)
+                }
             }
             .frame(height: 16)
             if spentBack != nil {
                 Capsule().fill(hot.opacity(0.55)).frame(height: 8)
+            } else if let big {
+                CapsMeter(pct: big, ceiling: ceiling, open: open)
             } else {
-                CapsMeter(pct: pct, ceiling: ceiling, open: open)
+                Capsule().fill(Color.white.opacity(0.06)).frame(height: 8)
             }
         }
         // 4pt hover margin above and below, so moving down the list never
@@ -355,10 +531,12 @@ private struct CapsRow: View {
         .animation(.easeOut(duration: 0.12), value: lit)
     }
 
-    /// The same kind of fact on every row: 5-hour use, or when a spent week
-    /// comes back, or how old Codex's reading is.
+    /// The same kind of fact on every row: why there is no number, or 5-hour
+    /// use, or when a spent week comes back, or how old a Codex reading is.
     private var small: Text {
+        if let word = capsStateShort(state) { return Text(word).foregroundColor(t3) }
         if let spentBack { return pair("back in ", spentBack) }
+        if pct == nil, fivePct != nil { return Text("5-hour").foregroundColor(t3) }
         if let fivePct { return pair("5h ", "\(capsWhole(fivePct))%", fiveTone(fivePct)) }
         if let readAge { return pair("read ", readAge) }
         return Text("")
@@ -376,32 +554,28 @@ private struct CapsShelfWidget: View {
 
     var body: some View {
         let now = Date()
-        let accounts = capsOrderAccounts(droplet.reading.accounts)
+        let accounts = droplet.reading.accounts
         VStack(alignment: .leading, spacing: 0) {
             header.padding(.bottom, 8)
-            if droplet.reading.hasReading {
-                ForEach(accounts) { a in
+            if accounts.isEmpty {
+                emptyState
+            } else {
+                ForEach(Array(accounts.enumerated()), id: \.element.id) { index, a in
                     let spent = (a.sevenDayPct ?? 0) >= 100
+                    // Codex has its own limits, so it sits a step apart from the Claude rows.
+                    let stepsApart = a.kind == .codex && index > 0 && accounts[index - 1].kind != .codex
                     CapsRow(
-                        id: a.account, name: capsShortName(a.account), pct: a.sevenDayPct ?? 0,
+                        id: a.account, name: droplet.settings.name(for: a), pct: a.sevenDayPct,
                         fivePct: a.fiveHourPct, ceiling: a.releaseDecision?.ceilingPct,
-                        open: a.releaseDecision?.released == true,
+                        open: a.releaseDecision?.released == true, state: a.state,
                         spentBack: spent ? capsUntil(a.sevenDayReset, now) : nil,
+                        readAge: a.kind == .codex ? a.seenAt.map { capsAgo($0, now) } : nil,
                         hovered: $hovered, compact: context.isCompact
                     )
-                }
-                if let c = droplet.codex {
-                    // Codex is not in the Claude average above, so it sits a step apart.
-                    CapsRow(
-                        id: "codex", name: "Codex", pct: c.pct, fivePct: nil, ceiling: nil, open: false,
-                        readAge: capsAgo(c.seenAt, now), hovered: $hovered, compact: context.isCompact
-                    )
-                    .padding(.top, 8)
+                    .padding(.top, stepsApart ? 8 : 0)
                 }
                 Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).padding(.top, 4).padding(.bottom, 8)
                 footer(accounts: accounts, now: now)
-            } else {
-                Text("no reading").font(.capsDetail).foregroundStyle(t3)
             }
             Spacer(minLength: 0)
         }
@@ -409,6 +583,18 @@ private struct CapsShelfWidget: View {
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { if let previewHover { hovered = previewHover } }
+    }
+
+    /// Nothing to show yet: say so and send the user to settings.
+    private var emptyState: some View {
+        HStack(alignment: .center, spacing: 8) {
+            Text("Nothing to show yet").font(.capsDetail).foregroundStyle(t3).lineLimit(1)
+            Spacer(minLength: 0)
+            Button("Set up") { droplet.openSettings() }
+                .buttonStyle(DroppyQuietButtonStyle(size: .small))
+        }
+        .frame(height: 22)
+        .padding(.top, 20)
     }
 
     private var header: some View {
@@ -419,7 +605,7 @@ private struct CapsShelfWidget: View {
             Text("Caps").font(.capsName).foregroundStyle(t2).padding(.leading, 4)
             Spacer(minLength: 8)
             if droplet.reading.hasReading {
-                Text(context.isCompact ? "7d avg " : "7d, all accounts ").font(.capsDetail).foregroundStyle(t3)
+                Text(context.isCompact ? "7d avg " : "7d total ").font(.capsDetail).foregroundStyle(t3)
                 HStack(alignment: .firstTextBaseline, spacing: 1) {
                     Text(droplet.reading.title.replacingOccurrences(of: "%", with: ""))
                         .font(.capsName).monospacedDigit().foregroundStyle(t2)
@@ -430,28 +616,26 @@ private struct CapsShelfWidget: View {
         .frame(height: 16)
     }
 
-    /// The card's last line. At rest it is the key to the one mark with no
-    /// words and says that rows have more; on hover it is that row's details.
-    /// One fixed 12pt line (shorter wording in the narrow slot), so the card never moves.
+    /// The card's last line. At rest it is the key to the budget tick (only when
+    /// some account has one) or a hint that rows have more; on hover it is that
+    /// row's details. One fixed 12pt line (shorter wording in the narrow slot),
+    /// so the card never moves.
     @ViewBuilder
     private func footer(accounts: [CapsAccount], now: Date) -> some View {
         let compact = context.isCompact
         let lit = hovered != nil
-        return HStack(alignment: .center, spacing: 4) {
-            if let id = hovered, id == "codex", let c = droplet.codex {
-                tickSlot(nil)
-                (Text(compact ? "" : "Codex · ").foregroundColor(t1)
-                 + Text("not in the average").foregroundColor(t2)
-                 + Text("  7d resets in \(capsUntil(c.resetsAt, now))").foregroundColor(t3))
-            } else if let id = hovered, let a = accounts.first(where: { $0.account == id }) {
+        HStack(alignment: .center, spacing: 4) {
+            if let id = hovered, let a = accounts.first(where: { $0.account == id }) {
                 detail(a, now: now, compact: compact)
-            } else {
+            } else if droplet.hasBudgetHolds {
                 // The key: both ticks exactly as they sit on a bar.
                 specimen(open: true)
                 Text("backlog open").foregroundStyle(t3)
                 specimen(open: false).padding(.leading, 8)
                 Text(compact ? "held" : "held for clients").foregroundStyle(t3)
                 if !compact { Text("· hover a row").foregroundStyle(t3).padding(.leading, 4) }
+            } else {
+                Text(compact ? "Hover a row" : "Hover a row for reset times").foregroundStyle(t3)
             }
             Spacer(minLength: 0)
         }
@@ -478,33 +662,49 @@ private struct CapsShelfWidget: View {
         if let open { specimen(open: open) } else { Color.clear.frame(width: 16, height: 8) }
     }
 
+    /// "  7d resets in 3d 4h · 5h in 2h", with whichever windows the account has.
+    private func resetText(_ a: CapsAccount, now: Date, compact: Bool) -> Text {
+        let seven = a.sevenDayReset != nil, five = a.fiveHourReset != nil
+        if compact { return Text("  resets \(capsUntil(seven ? a.sevenDayReset : a.fiveHourReset, now))").foregroundColor(t3) }
+        if seven && five { return Text("  7d resets in \(capsUntil(a.sevenDayReset, now)) · 5h in \(capsUntil(a.fiveHourReset, now))").foregroundColor(t3) }
+        if seven { return Text("  7d resets in \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3) }
+        return Text("  5h resets in \(capsUntil(a.fiveHourReset, now))").foregroundColor(t3)
+    }
+
     @ViewBuilder
     private func detail(_ a: CapsAccount, now: Date, compact: Bool) -> some View {
-        let name = Text(compact ? "" : "\(capsShortName(a.account)) · ").foregroundColor(t1)
-        if (a.sevenDayPct ?? 0) >= 100 {
+        let name = Text(compact ? "" : "\(droplet.settings.name(for: a)) · ").foregroundColor(t1)
+        if a.state != .ok {
+            tickSlot(nil)
+            (name + Text(capsStateLong(a.state, compact: compact)).foregroundColor(t2))
+        } else if (a.sevenDayPct ?? 0) >= 100 {
             tickSlot(nil)
             (name + Text("7d used up").foregroundColor(t2)
              + Text("  back in \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3))
         } else {
-            // Two groups, 2 spaces apart: the budget, then when each window resets.
-            let times = compact
-                ? Text("  resets \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3)
-                : Text("  7d resets in \(capsUntil(a.sevenDayReset, now)) · 5h in \(capsUntil(a.fiveHourReset, now))").foregroundColor(t3)
+            // Two groups, 2 spaces apart: what it is, then when each window resets.
+            let times = resetText(a, now: now, compact: compact)
             if let d = a.releaseDecision, let c = d.ceilingPct, (d.hoursToReset ?? 0) > 0 {
                 let cap = Int(min(100, max(0, c)).rounded())
                 tickSlot(d.released == true)
                 (name + Text("\(d.released == true ? "open" : "held") · cap \(cap)%").foregroundColor(t2)
                  + times)
-            } else {
+            } else if a.kind == .snapshot {
                 tickSlot(nil)
                 (name + Text("no cap").foregroundColor(t2) + times)
+            } else if a.kind == .codex, droplet.codexIsOutsideTotal {
+                tickSlot(nil)
+                (name + Text("not in the total").foregroundColor(t2) + times)
+            } else {
+                tickSlot(nil)
+                (name + times)
             }
         }
     }
 }
 
 
-// MARK: - Live activity (the compact state: a small gauge and the fleet %)
+// MARK: - Live activity (the compact state: a small gauge and the total %)
 
 extension CapsdroppyDroplet: LiveActivityProviding {
     public var liveActivityState: AnyPublisher<LiveActivityState?, Never> {
@@ -512,7 +712,7 @@ extension CapsdroppyDroplet: LiveActivityProviding {
     }
 
     public func makeCompactLeading() -> AnyView {
-        AnyView(CapsProgressRing(fraction: fleetFraction, tint: fleetTint))
+        AnyView(CapsProgressRing(fraction: totalFraction, tint: totalTint))
     }
 
     public func makeCompactTrailing() -> AnyView {
@@ -543,7 +743,7 @@ extension CapsdroppyDroplet: LiveActivityProviding {
         activitySubject.send(
             LiveActivityState(
                 priority: 120,
-                accessibilityTitle: "Caps fleet usage \(reading.title)",
+                accessibilityTitle: "Caps total usage \(reading.title)",
                 isInteractive: false
             )
         )
@@ -551,7 +751,7 @@ extension CapsdroppyDroplet: LiveActivityProviding {
 }
 
 /// A small ring, `DroppyLiveActivityMetrics.progressRingSize` (20pt) across,
-/// filled to the fleet fraction. Deliberately no percentage glyph inside it —
+/// filled to the total fraction. Deliberately no percentage glyph inside it —
 /// the trailing accessory already carries the number, and the ring at this
 /// size has room for a fill, not a legible digit (the SDK reserves an 8pt
 /// glyph slot here for something like a lock or a checkmark, too small for

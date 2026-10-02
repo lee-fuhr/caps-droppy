@@ -10,14 +10,16 @@ shelf and beside the notch. Built with [DroppyKit](https://getdroppy.app/docs/dr
 - A total (the average 7-day use) as a small ring and percentage beside the notch.
 - A short banner from the notch when an account runs out or comes back, or a 5-hour window
   runs high. Each banner can be switched off, and so can all of them.
-- Any number of Claude and Codex accounts, in any mix. Name each one, or switch it off.
+- Any number of Claude and Codex accounts, in any mix. Each row carries its service's mark, so a
+  single Claude or Codex account needs no name. Name accounts to tell two of one service apart (an
+  unnamed second account shows as 1, 2); switch any off.
 
 ## Where the numbers come from
 
 **Codex** is read from Codex's own session logs on your Mac: `~/.codex`, any `~/.codex-*`
-folder beside it, `CODEX_HOME`, and any folder you add in settings. Nothing is sent anywhere.
+folder beside it, `CODEX_HOME`, and any folder you add in settings (a folder picker, or type the path). Nothing is sent anywhere.
 
-**Claude** is opt-in. Until you turn on "Show Claude usage" in Caps' settings, Caps does not
+**Claude** is opt-in (Settings, Claude, "Show Claude usage"; "What Caps reads and sends" next to it has the full detail). Until you turn on "Show Claude usage" in Caps' settings, Caps does not
 touch your keychain and does not use the network.
 
 When you turn it on, Caps:
@@ -60,5 +62,8 @@ swift test           # unit tests: alerts, Codex and Claude parsing, backoff, to
 Preview switches for the harness (unset in Droppy): `CAPS_PREVIEW_SNAPSHOT`,
 `CAPS_PREVIEW_HOME`, `CAPS_PREVIEW_KEYCHAIN` (lists names; never touches the keychain or the
 network), `CAPS_PREVIEW_OPTIN`, `CAPS_PREVIEW_ONBOARDED`, `CAPS_PREVIEW_HOVER`.
+
+The Claude and OpenAI marks are trademarks of Anthropic and OpenAI, used only to say which service
+an account belongs to. Outlines from [Simple Icons](https://simpleicons.org).
 
 MIT licence.

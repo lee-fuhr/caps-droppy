@@ -4,8 +4,7 @@
 //
 //  Every setting the droplet has. The 1.0.6 settings keep their keys and defaults
 //  (which equal what 1.0.5 hard-coded); 1.1.0 adds the account switches, names,
-//  the Claude opt-in, extra Codex folders, the Advanced snapshot file and the
-//  first-run flag.
+//  the Claude opt-in, extra Codex folders and the Advanced snapshot file.
 //  Stored through the host's own droplet-scoped preferences, never UserDefaults.
 //  Lee, live 2026-10-02 10:03am: 'I want to be able to easily toggle
 //  notifications on/off at least.'
@@ -42,8 +41,6 @@ struct CapsSettings: Equatable {
     var codexFolders: [String] = []
     /// Advanced: a snapshot file to read. Empty means none.
     var snapshotPath = ""
-    /// The first-run welcome has been dismissed.
-    var onboarded = false
 
     static let refreshRange = 30.0...300.0
     static let thresholdRange = 50.0...100.0
@@ -56,13 +53,10 @@ struct CapsSettings: Equatable {
 
     func isEnabled(_ id: String) -> Bool { accountEnabled[id] ?? true }
 
-    /// What the card calls an account: the user's name for it, else the
-    /// source's suggestion ("Claude 2", "Codex"). A snapshot row keeps the
-    /// names Caps has always shown ("backup" reads "Secondary").
-    func name(for account: CapsAccount) -> String {
-        if let own = accountNames[account.account]?.trimmingCharacters(in: .whitespaces), !own.isEmpty { return own }
-        if account.kind == .snapshot { return capsShortName(account.account) }
-        return account.suggestedName ?? capsDisplayName(account.account)
+    /// The name the user gave an account, if any.
+    func ownName(_ id: String) -> String? {
+        let t = accountNames[id]?.trimmingCharacters(in: .whitespaces)
+        return (t?.isEmpty ?? true) ? nil : t
     }
 
     /// Everything that decides WHAT is read. A change here needs a fresh
@@ -97,7 +91,7 @@ struct CapsSettings: Equatable {
     enum Key: String {
         case notifications, alertFull, alertBack, alertOpened, alertFiveHour
         case fiveHourThreshold, fiveHourRearm, refreshSeconds, showCodex, showGauge
-        case claudeOptIn, accountEnabled, accountNames, codexFolders, snapshotPath, onboarded
+        case claudeOptIn, accountEnabled, accountNames, codexFolders, snapshotPath
     }
 
     @MainActor
@@ -121,21 +115,26 @@ struct CapsSettings: Equatable {
         s.accountNames = prefs.value(forKey: Key.accountNames.rawValue, default: s.accountNames)
         s.codexFolders = prefs.value(forKey: Key.codexFolders.rawValue, default: s.codexFolders)
         s.snapshotPath = prefs.value(forKey: Key.snapshotPath.rawValue, default: s.snapshotPath)
-        s.onboarded = bool(.onboarded, s.onboarded)
         return s
     }
 }
 
 // MARK: - Settings pane
 
-extension CapsdroppyDroplet: SettingsPaneProviding {
+extension CapsdroppyDroplet: SettingsPagesProviding {
     public func makeSettingsPane(context: SettingsPaneContext) -> AnyView {
-        AnyView(CapsSettingsPane(droplet: self))
+        if previewEnv["CAPS_PREVIEW_PAGE"] == "claude-details" { return AnyView(CapsClaudeDetailsPage()) }
+        return AnyView(CapsSettingsPane(droplet: self))
+    }
+
+    public func makeSettingsPage(id: String, context: SettingsPaneContext) -> AnyView? {
+        id == "claude-details" ? AnyView(CapsClaudeDetailsPage()) : nil
     }
 
     public var settingsSearchEntries: [SettingsSearchEntry] {
         [
             SettingsSearchEntry(title: "Show Claude usage", keywords: ["claude", "login", "keychain", "opt in", "caps"]),
+            SettingsSearchEntry(title: "What Caps reads and sends", keywords: ["claude", "privacy", "disclosure", "caps"]),
             SettingsSearchEntry(title: "Codex folders", keywords: ["codex", "home", "add", "account", "caps"]),
             SettingsSearchEntry(title: "Notifications", keywords: ["alerts", "banner", "notch", "caps"]),
             SettingsSearchEntry(title: "5-hour alert level", keywords: ["threshold", "percent", "caps"]),
@@ -145,6 +144,10 @@ extension CapsdroppyDroplet: SettingsPaneProviding {
             SettingsSearchEntry(title: "Snapshot file", keywords: ["advanced", "json", "caps"])
         ]
     }
+}
+
+private func capsNote(_ text: String) -> some View {
+    Text(text).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 }
 
 /// A text field that commits when the user presses Return or leaves it, so
@@ -165,6 +168,45 @@ private struct CapsCommitField: View {
             .onChange(of: focused) { _, now in if !now { onCommit(text) } }
             .onAppear { text = value }
             .onChange(of: value) { _, new in if !focused { text = new } }
+    }
+}
+
+/// The full disclosure for the Claude switch, one step from the pane.
+private struct CapsClaudeDetailsPage: View {
+    private func block(_ title: String, _ lines: [String]) -> some View {
+        DropletSettingsSection {
+            settingsSectionHeader(LocalizedStringKey(title))
+        } content: {
+            DropletSettingsCard {
+                ForEach(lines, id: \.self) { line in
+                    Text(line).font(.body).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    var body: some View {
+        DropletSettingsPage {
+            block("What Caps reads", [
+                "The Claude Code login that Claude Code already saved in this Mac's keychain, under the name \"Claude Code-credentials\". A Claude Code that keeps its login in another folder saves it under the same name with a suffix, and Caps lists those too.",
+                "macOS asks you to allow this. Choose Always Allow and it stops asking."
+            ])
+            block("What Caps sends", [
+                "One request to api.anthropic.com for each Claude login you leave on, once per refresh and never more than once a minute. It carries that login to sign in, and says it is Caps-Droppy.",
+                "If Anthropic asks it to slow down, Caps waits."
+            ])
+            block("What Caps never does", [
+                "Store the login, write it to a file, log it, or send it anywhere except that one request.",
+                "Renew the login. Claude Code does that, so an expired login shows as expired until you use Claude Code.",
+                "Use a claude.ai web sign-in. Caps has none, and Anthropic's terms do not allow one to be passed through a third-party tool."
+            ])
+            block("If a row says it can't report usage", [
+                "Anthropic answered that this login is not allowed to read usage. That is not a cap. Signing in to Claude Code again usually fixes it."
+            ])
+            block("Turning it off", [
+                "Switching off \"Show Claude usage\" stops every keychain read and every request at once, and forgets the readings."
+            ])
+        }
     }
 }
 
@@ -196,73 +238,41 @@ private struct CapsSettingsPane: View {
         s < 60 ? "\(Int(s)) sec" : s.truncatingRemainder(dividingBy: 60) == 0 ? "\(Int(s / 60)) min" : "\(Int(s / 60)) min \(Int(s) % 60) sec"
     }
 
-    private func note(_ text: String) -> some View {
-        Text(text).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-    }
-
-    /// One account: its switch (titled with the name the card shows) and the
-    /// name the user can change.
-    @ViewBuilder
-    private func accountRows(id: String, suggested: String, detail: String, removeFolder: String? = nil) -> some View {
-        let shown = droplet.settings.accountNames[id].flatMap { $0.isEmpty ? nil : $0 } ?? suggested
-        DropletToggleRow(title: shown, subtitle: detail, isOn: enabled(id))
-        DropletControlRow(title: "Name") {
-            HStack(spacing: 8) {
-                TextField("", text: name(id), prompt: Text(suggested)).labelsHidden().textFieldStyle(.roundedBorder).frame(width: 170)
+    /// One account, a real row: the service's mark, its name (optional when it
+    /// is the only one of its service) and its switch.
+    private func accountRow(id: String, kind: CapsAccountKind, caption: String, removeFolder: String? = nil) -> some View {
+        let several = droplet.serviceCount(kind) > 1
+        return Toggle(isOn: enabled(id)) {
+            HStack(alignment: .center, spacing: 8) {
+                CapsServiceIcon(kind: kind, size: 16).foregroundStyle(.secondary).frame(width: 20)
+                VStack(alignment: .leading, spacing: 2) {
+                    TextField("", text: name(id), prompt: Text(several ? "Name this account" : "\(droplet.serviceWord(kind)) (add a name if you like)"))
+                        .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 260)
+                    Text(caption).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+                }
                 if let removeFolder {
-                    Button { droplet.removeCodexFolder(removeFolder) } label: {
-                        Image(systemName: "minus")
-                    }
-                    .buttonStyle(DroppyCircleButtonStyle(size: 24, destructive: true, solidFill: nil, foregroundColorOverride: nil))
-                    .help("Stop reading this folder")
+                    Button { droplet.removeCodexFolder(removeFolder) } label: { Image(systemName: "minus") }
+                        .buttonStyle(DroppyCircleButtonStyle(size: 22, destructive: true, solidFill: nil, foregroundColorOverride: nil))
+                        .help("Stop reading this folder")
                 }
             }
         }
-        .disabled(!droplet.settings.isEnabled(id))
+        .toggleStyle(.switch)
+    }
+
+    private func tilde(_ path: String) -> String {
+        let home = NSHomeDirectory()
+        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
     }
 
     var body: some View {
         let s = droplet.settings
         let optedIn = s.claudeOptIn
         DropletSettingsPane {
-            if !s.onboarded { welcome }
-
             DropletSettingsSection {
                 VStack(alignment: .leading, spacing: 2) {
-                    settingsSectionHeader("Codex")
-                    note("Read from Codex's own session logs on this Mac. Nothing is sent anywhere.")
-                }
-            } content: {
-                DropletSettingsCard {
-                    if droplet.codexHomes.isEmpty {
-                        DropletControlRow(title: "No Codex folder found") { DropletValuePill(text: "none") }
-                    }
-                    ForEach(droplet.codexHomes, id: \.path) { home in
-                        accountRows(id: home.accountID, suggested: home.suggestedName, detail: home.path,
-                                    removeFolder: home.isAdded ? home.path : nil)
-                    }
-                    DropletControlRow(title: "Add a Codex folder", infoTip: "A folder that holds Codex's sessions, such as one CODEX_HOME points to.") {
-                        HStack(spacing: 8) {
-                            CapsCommitField(prompt: "~/work/.codex", value: "") { text in
-                                folderMessage = droplet.addCodexFolder(text)
-                            }
-                            .frame(width: 190)
-                        }
-                    }
-                    if let folderMessage {
-                        DropletControlRow(title: folderMessage) { EmptyView() }
-                    }
-                }
-            }
-
-            DropletSettingsSection {
-                VStack(alignment: .leading, spacing: 6) {
                     settingsSectionHeader("Claude")
-                    note("Caps can show your exact Claude usage. It reads the Claude Code login already saved on this Mac, and only that.")
-                    note("Reads: the Claude Code login in your Mac's keychain. macOS will ask you to allow this.")
-                    note("Sends: one usage request to Anthropic for each refresh, from this Mac.")
-                    note("Never: stores the login, logs it, or sends it anywhere else.")
-                    note("This is not a claude.ai web sign-in. Claude Code keeps the login fresh; Caps never renews it.")
+                    capsNote("Reads the Claude Code login saved on this Mac and sends one usage request to Anthropic per refresh. macOS asks first.")
                 }
             } content: {
                 DropletSettingsCard {
@@ -271,17 +281,46 @@ private struct CapsSettingsPane: View {
                         subtitle: "Off until you turn it on. Turning it off stops every request.",
                         isOn: bool(.claudeOptIn, \.claudeOptIn)
                     )
+                    DropletSettingsPageLink("What Caps reads and sends", subtitle: "The full detail, including what it never does.", page: "claude-details") {
+                        Image(systemName: "info.circle").font(.system(size: 16)).foregroundStyle(.secondary)
+                    }
                     if droplet.claudeServices.isEmpty {
-                        DropletControlRow(title: "No Claude Code login found") { DropletValuePill(text: "none") }
+                        capsNote("No Claude Code login found on this Mac. Sign in to Claude Code and it will show up here.")
                     }
-                    let names = capsClaudeNames(droplet.claudeServices)
                     ForEach(droplet.claudeServices, id: \.self) { service in
-                        Group {
-                            accountRows(id: capsClaudeAccountID(service), suggested: names[service] ?? "Claude",
-                                        detail: "Claude Code login, keychain item \"\(service)\"")
-                        }
-                        .disabled(!optedIn)
+                        accountRow(id: capsClaudeAccountID(service), kind: .claude,
+                                   caption: service == claudeServicePrefix ? "Claude Code login" : "Claude Code login (another config folder)")
+                            .disabled(!optedIn)
                     }
+                }
+            }
+
+            DropletSettingsSection {
+                VStack(alignment: .leading, spacing: 2) {
+                    settingsSectionHeader("Codex")
+                    capsNote("Reads Codex's own session logs on this Mac. Nothing is sent anywhere.")
+                }
+            } content: {
+                DropletSettingsCard {
+                    if droplet.codexHomes.isEmpty {
+                        capsNote("No Codex folder found. Caps looks in ~/.codex. If you keep Codex somewhere else (CODEX_HOME) or use a second Codex login, add that folder below.")
+                    }
+                    ForEach(droplet.codexHomes, id: \.path) { home in
+                        accountRow(id: home.accountID, kind: .codex, caption: tilde(home.path),
+                                   removeFolder: home.isAdded ? home.path : nil)
+                    }
+                    HStack {
+                        Button("Choose a folder…") { folderMessage = droplet.chooseCodexFolder() }
+                            .buttonStyle(DroppyQuietButtonStyle(size: .small))
+                        Spacer(minLength: 0)
+                    }
+                    DropletControlRow(title: "Or type its path") {
+                        CapsCommitField(prompt: "~/.codex-work", value: "") { text in
+                            folderMessage = droplet.addCodexFolder(text)
+                        }
+                        .frame(width: 200)
+                    }
+                    if let folderMessage { capsNote(folderMessage) }
                 }
             }
 
@@ -310,7 +349,7 @@ private struct CapsSettingsPane: View {
             DropletSettingsSection {
                 VStack(alignment: .leading, spacing: 2) {
                     settingsSectionHeader("5-hour alert")
-                    note("When the 5-hour banner fires, and how far a window must fall before it can fire again.")
+                    capsNote("When the 5-hour banner fires, and how far a window must fall before it can fire again.")
                 }
             } content: {
                 DropletSettingsCard {
@@ -359,7 +398,7 @@ private struct CapsSettingsPane: View {
             DropletSettingsSection {
                 VStack(alignment: .leading, spacing: 2) {
                     settingsSectionHeader("Advanced")
-                    note("Optional. A JSON file of accounts that another tool keeps up to date. Leave it empty if you do not have one.")
+                    capsNote("Optional. A JSON file of accounts that another tool keeps up to date. Leave it empty if you do not have one.")
                 }
             } content: {
                 DropletSettingsCard {
@@ -368,25 +407,6 @@ private struct CapsSettingsPane: View {
                             droplet.setSetting(.snapshotPath, \.snapshotPath, text.trimmingCharacters(in: .whitespacesAndNewlines))
                         }
                     }
-                }
-            }
-        }
-    }
-
-    /// First run: what Caps found on this Mac, before anything is read.
-    private var welcome: some View {
-        DropletSettingsSection {
-            VStack(alignment: .leading, spacing: 2) {
-                settingsSectionHeader("Welcome")
-                note("Caps shows how much of your Claude and Codex limits you have used. This is what it found on this Mac. Nothing has been sent anywhere.")
-            }
-        } content: {
-            DropletSettingsCard {
-                DropletControlRow(title: "Codex folders found") { DropletValuePill(text: "\(droplet.codexHomes.count)") }
-                DropletControlRow(title: "Claude Code logins found") { DropletValuePill(text: "\(droplet.claudeServices.count)") }
-                DropletControlRow(title: "Claude is off until you turn it on below") {
-                    Button("Got it") { droplet.setSetting(.onboarded, \.onboarded, true) }
-                        .buttonStyle(DroppyAccentButtonStyle(size: .small))
                 }
             }
         }

@@ -11,6 +11,7 @@
 //  droplet reads; it never writes outside Droppy's own preferences.
 //
 
+import AppKit
 import Combine
 import DroppyKit
 import SwiftUI
@@ -31,10 +32,11 @@ public final class CapsdroppyPrincipal: NSObject, DropletPrincipal {
 ///   CAPS_PREVIEW_KEYCHAIN  comma-separated Claude keychain service names to list; the
 ///                          keychain is never touched and no request is sent
 ///   CAPS_PREVIEW_OPTIN=1   the Claude switch on
-///   CAPS_PREVIEW_ONBOARDED=1  the welcome dismissed
+///   CAPS_PREVIEW_NAMES     JSON of account id to the user's own name
 ///   CAPS_PREVIEW_ALERT=1   a sample banner
 ///   CAPS_PREVIEW_HOVER     an account id to render hovered
-private let previewEnv = ProcessInfo.processInfo.environment
+///   CAPS_PREVIEW_PAGE=claude-details  show that settings page in place of the pane
+let previewEnv = ProcessInfo.processInfo.environment
 
 /// A keychain that lists the names it is told and holds a login that cannot
 /// report usage, so a preview never touches the real keychain or the network.
@@ -79,6 +81,8 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     private var codexAccounts: [CapsAccount] = []
     private var claudeAccounts: [CapsAccount] = []
     private var knownIDs = Set<String>()
+    /// Account ids per service, in card order: the ordinal of an unnamed account among its own service.
+    private var serviceIDs: [CapsAccountKind: [String]] = [:]
     private var lastDiscovery = Date.distantPast
     private var claudeTask: Task<Void, Never>?
 
@@ -118,8 +122,8 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     private func loadSettings() -> CapsSettings {
         var s = CapsSettings.load(from: host?.preferences)
         if previewEnv["CAPS_PREVIEW_OPTIN"] == "1" { s.claudeOptIn = true }
-        if previewEnv["CAPS_PREVIEW_ONBOARDED"] == "1" { s.onboarded = true }
         if let path = previewEnv["CAPS_PREVIEW_SNAPSHOT"] { s.snapshotPath = path }
+        if let json = previewEnv["CAPS_PREVIEW_NAMES"], let d = try? JSONDecoder().decode([String: String].self, from: Data(json.utf8)) { s.accountNames = d }
         return s
     }
 
@@ -155,6 +159,22 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         if codexHomes.contains(where: { $0.path == path }) { return "Already in the list." }
         setSetting(.codexFolders, \.codexFolders, settings.codexFolders + [path])
         return nil
+    }
+
+    /// Opens the system folder picker (DroppyKit has none) on the home folder with
+    /// hidden folders shown, since Codex's lives in ".codex". Returns what
+    /// `addCodexFolder` returns; nil also when the user cancels.
+    func chooseCodexFolder() -> String? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.showsHiddenFiles = true
+        panel.directoryURL = homeDirectory
+        panel.message = "Choose the folder that holds Codex's sessions folder."
+        panel.prompt = "Choose"
+        guard panel.runModal() == .OK, let url = panel.url else { return nil }
+        return addCodexFolder(url.path)
     }
 
     func removeCodexFolder(_ path: String) {
@@ -248,12 +268,51 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     private func rebuild() {
         let before = cardHeight
         let enabled = (snapshotAccounts + claudeAccounts + codexAccounts).filter { settings.isEnabled($0.account) }
+        recomputeServices()
         reading = capsBuildReading(accounts: capsOrderAccounts(enabled))
         hasBudgetHolds = reading.accounts.contains { $0.releaseDecision?.ceilingPct != nil }
         publishActivity()
         announceChanges()
         // An account coming or going changes the card's height.
         if cardHeight != before { host?.shelf.invalidateLayout(for: "fleet") }
+    }
+
+    /// Which accounts exist per service, so an unnamed one can be told from its siblings.
+    private func recomputeServices() {
+        var ids: [CapsAccountKind: Set<String>] = [:]
+        for h in codexHomes { ids[.codex, default: []].insert(h.accountID) }
+        for c in claudeServices { ids[.claude, default: []].insert(capsClaudeAccountID(c)) }
+        for a in snapshotAccounts where a.kind != .snapshot { ids[a.kind, default: []].insert(a.account) }
+        let next = ids.mapValues { $0.sorted() }
+        if next != serviceIDs { serviceIDs = next; objectWillChange.send() }
+    }
+
+    func serviceCount(_ kind: CapsAccountKind) -> Int { serviceIDs[kind]?.count ?? 0 }
+
+    func serviceWord(_ kind: CapsAccountKind) -> String {
+        switch kind { case .claude: return "Claude"; case .codex: return "Codex"; case .snapshot: return "Account" }
+    }
+
+    /// 1-based place among the accounts of its service.
+    private func ordinal(_ a: CapsAccount) -> Int { (serviceIDs[a.kind]?.firstIndex(of: a.account) ?? 0) + 1 }
+
+    /// What the card prints beside an account's mark, or nil for the mark alone.
+    /// The user's name wins. An account that is the only one of its service has
+    /// no name (the mark says it). Several of one service, unnamed, show their
+    /// place, "1", "2": a folder name is usually ".codex" for all of them and a
+    /// keychain name is a hash, so a number is the one thing that is always
+    /// distinct, short and true. Snapshot rows keep the names they have always had.
+    func cardName(for a: CapsAccount) -> String? {
+        if let own = settings.ownName(a.account) { return own }
+        if a.kind == .snapshot { return capsShortName(a.account) }
+        return serviceCount(a.kind) > 1 ? "\(ordinal(a))" : nil
+    }
+
+    /// The full name, for a banner or the card's bottom line: "Claude", "Codex 2", or the user's own.
+    func label(for a: CapsAccount) -> String {
+        if let own = settings.ownName(a.account) { return own }
+        if a.kind == .snapshot { return capsShortName(a.account) }
+        return serviceCount(a.kind) > 1 ? "\(serviceWord(a.kind)) \(ordinal(a))" : serviceWord(a.kind)
     }
 
     /// One notch banner per real change (see CapsAlerts.swift). A missing
@@ -263,7 +322,7 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         let now = Date()
         let rows = reading.accounts.filter { $0.hasNumbers }.map { a in
             CapsAlertTracker.Snapshot(
-                id: a.account, name: settings.name(for: a),
+                id: a.account, name: label(for: a),
                 sevenDay: a.sevenDayPct, fiveHour: a.fiveHourPct,
                 released: a.releaseDecision?.released, ceiling: a.releaseDecision?.ceilingPct,
                 reset7: capsUntil(a.sevenDayReset, now), reset5: capsUntil(a.fiveHourReset, now))
@@ -337,14 +396,26 @@ extension CapsdroppyDroplet: ShelfWidgetProviding {
     /// Exact content height: 8pt host insets top and bottom, the 16pt header and
     /// 8pt under it, then the rows (or the empty state).
     var cardHeight: CGFloat {
-        guard !reading.accounts.isEmpty else { return 8 + 16 + 8 + 12 + 8 + 22 + 8 }
-        // Every row is 36 (28 of content, 4pt hover margin above and below),
-        // and Codex steps 8 apart from the Claude rows above it.
+        guard !reading.accounts.isEmpty else { return 8 + CapsLayout.headerInset + 16 + 8 + 12 + 8 + 22 + 8 }
+        // Every row is 36 (28 of content, 4pt hover margin above and below); a
+        // group of Claude rows and a group of Codex rows are CapsLayout.groupGap apart.
         let kinds = Set(reading.accounts.map { $0.kind == .codex })
-        let rows = CGFloat(reading.accounts.count) * 36 + (kinds.count == 2 ? 8 : 0)
+        let rows = CGFloat(reading.accounts.count) * CapsLayout.rowPitch + (kinds.count == 2 ? CapsLayout.groupGap : 0)
         // Footer: a hairline with 6pt either side, then one 12pt line.
-        return 8 + 16 + 8 + rows + 12.5 + 12 + 8
+        return 8 + CapsLayout.headerInset + 16 + 8 + rows + 12.5 + 12 + 8
     }
+}
+
+/// The card's rhythm, in one place: every row is the same height, and the one
+/// gap between the Claude rows and the Codex rows is clearly larger than the
+/// gap between rows.
+enum CapsLayout {
+    static let rowPitch: CGFloat = 36
+    static let groupGap: CGFloat = 14
+    /// Extra room at the top of the card, and either side of the header, so the
+    /// header's mark and number clear the rounded corners (notch and island).
+    static let headerInset: CGFloat = 6
+    static let sideInset: CGFloat = 6
 }
 
 // MARK: Card tokens
@@ -471,10 +542,10 @@ func capsStateLong(_ state: CapsAccountState, compact: Bool) -> String {
     switch state {
     case .ok: return ""
     case .pending: return "Reading…"
-    case .noUsageScope: return compact ? "This login can't report usage" : "This login can't report usage. Sign in to Claude Code again."
-    case .loginExpired: return compact ? "Login expired" : "Login expired. Claude Code renews it when you use it."
-    case .accessDenied: return compact ? "macOS didn't allow access" : "macOS didn't allow access. Turn Claude off and on in settings to be asked again."
-    case .unreachable: return compact ? "Can't reach Anthropic" : "Can't reach Anthropic. Trying again shortly."
+    case .noUsageScope: return compact ? "Can't report usage" : "This login can't report usage"
+    case .loginExpired: return compact ? "Login expired" : "Login expired. Use Claude Code to renew it."
+    case .accessDenied: return compact ? "Access not allowed" : "macOS didn't allow access. Toggle Claude off and on."
+    case .unreachable: return compact ? "Can't reach Anthropic" : "Can't reach Anthropic. Retrying."
     case .noActivity: return compact ? "No recent Codex use" : "No recent Codex use to read yet."
     }
 }
@@ -484,7 +555,9 @@ func capsStateLong(_ state: CapsAccountState, compact: Bool) -> String {
 /// its details in the card's bottom line.
 private struct CapsRow: View {
     let id: String
-    let name: String; let pct: Double?; let fivePct: Double?
+    let kind: CapsAccountKind
+    /// Beside the service's mark; nil when the mark alone says which account it is.
+    let name: String?; let pct: Double?; let fivePct: Double?
     let ceiling: Double?; let open: Bool
     var state: CapsAccountState = .ok
     var spentBack: String? = nil
@@ -498,7 +571,12 @@ private struct CapsRow: View {
         let big = pct ?? fivePct
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 0) {
-                Text(name).font(.capsName).foregroundStyle(spentBack == nil && big != nil ? t1 : t2).lineLimit(1)
+                let ink = spentBack == nil && big != nil ? t1 : t2
+                HStack(alignment: .center, spacing: 6) {
+                    // Fixed square, so a row with a mark and a row without one still share a baseline.
+                    if kind != .snapshot { CapsServiceIcon(kind: kind, size: 13).foregroundStyle(ink) }
+                    if let name { Text(name).font(.capsName).foregroundStyle(ink).lineLimit(1) }
+                }
                 Spacer(minLength: 8)
                 small.font(.capsDetail).monospacedDigit().lineLimit(1).padding(.trailing, big == nil ? 0 : 8)
                 // A fixed number column, so every small slot ends on one edge.
@@ -565,21 +643,24 @@ private struct CapsShelfWidget: View {
                     // Codex has its own limits, so it sits a step apart from the Claude rows.
                     let stepsApart = a.kind == .codex && index > 0 && accounts[index - 1].kind != .codex
                     CapsRow(
-                        id: a.account, name: droplet.settings.name(for: a), pct: a.sevenDayPct,
+                        id: a.account, kind: a.kind, name: droplet.cardName(for: a), pct: a.sevenDayPct,
                         fivePct: a.fiveHourPct, ceiling: a.releaseDecision?.ceilingPct,
                         open: a.releaseDecision?.released == true, state: a.state,
                         spentBack: spent ? capsUntil(a.sevenDayReset, now) : nil,
                         readAge: a.kind == .codex ? a.seenAt.map { capsAgo($0, now) } : nil,
                         hovered: $hovered, compact: context.isCompact
                     )
-                    .padding(.top, stepsApart ? 8 : 0)
+                    .padding(.top, stepsApart ? CapsLayout.groupGap : 0)
                 }
                 Rectangle().fill(Color.white.opacity(0.08)).frame(height: 0.5).padding(.top, 4).padding(.bottom, 8)
                 footer(accounts: accounts, now: now)
             }
             Spacer(minLength: 0)
         }
-        // The one padding every widget applies: the host's corner clearance.
+        // Room so the header's mark and the rows' edges clear the rounded corners
+        // in both shapes, then the one padding every widget applies.
+        .padding(.horizontal, CapsLayout.sideInset)
+        .padding(.top, CapsLayout.headerInset)
         .padding(context.contentInsets)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .onAppear { if let previewHover { hovered = previewHover } }
@@ -673,7 +754,7 @@ private struct CapsShelfWidget: View {
 
     @ViewBuilder
     private func detail(_ a: CapsAccount, now: Date, compact: Bool) -> some View {
-        let name = Text(compact ? "" : "\(droplet.settings.name(for: a)) · ").foregroundColor(t1)
+        let name = Text(compact ? "" : "\(droplet.label(for: a)) · ").foregroundColor(t1)
         if a.state != .ok {
             tickSlot(nil)
             (name + Text(capsStateLong(a.state, compact: compact)).foregroundColor(t2))

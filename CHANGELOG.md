@@ -5,7 +5,8 @@
 - Works for anyone, with any number of Claude and Codex accounts in any mix. Lee, live 2026-10-02 10:31am: the public version supports any number and combination of Claude and Codex accounts, and Claude's exact usage comes from an opt-in step in setup that reads the user's own Claude Code login already saved on their Mac.
 - Codex: reads every Codex folder it finds (and any folder you add), showing both the 5-hour and 7-day windows, named by folder.
 - Claude: off until you turn it on. Caps reads the Claude Code login saved on your Mac and sends one usage request to Anthropic per refresh (never more than once a minute). It never stores, logs or forwards the login. A login that cannot report usage shows as such. No claude.ai web sign-in.
-- First run shows what Caps found on this Mac. Each account has its own switch and an editable name.
+- Settings list what Caps found as real rows: each account has its service's mark, a switch and an optional name (needed only to tell two accounts of one service apart). A folder picker adds Codex folders. The Claude switch has one sentence beside it and the full disclosure one step away.
+- Rows on the shelf card show the service's mark instead of a name, with even row heights and one clear gap between the Claude and Codex groups; the header clears the rounded corners.
 - New Advanced setting: a snapshot file. Empty by default. Set to a snapshot file, accounts, budget holds, their banners and the backlog cap tick work as in 1.0.6; with no snapshot, the hold and cap UI is hidden.
 - "Fleet" is now "total" in everything you read. Every 1.0.6 setting and alert rule is unchanged.
 

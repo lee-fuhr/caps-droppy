@@ -8,6 +8,7 @@
 - Settings list what Caps found as real rows: each account has its service's mark, a switch and an optional name (needed only to tell two accounts of one service apart). A folder picker adds Codex folders. The Claude switch has one sentence beside it and the full disclosure one step away.
 - Rows on the shelf card show the service's mark instead of a name, with even row heights and one clear gap between the Claude and Codex groups; the header clears the rounded corners.
 - New Advanced setting: a snapshot file. Empty by default. Set to a snapshot file, accounts, budget holds, their banners and the backlog cap tick work as in 1.0.6; with no snapshot, the hold and cap UI is hidden.
+- Upgrading Lee's 1.0.6 install keeps using its existing snapshot file unless the snapshot path setting has already been saved, including as empty.
 - Every 7-day bar has a pace mark: a small triangle where a steady pace would have you by now (the share of the week that has passed). Bar past the mark means you will run out before the reset; the bar is warm then, calm at or under it, and hot near the top. Hover a row for "ahead of pace, runs out ~Tue 4pm" or "on pace, resets Wed 11am".
 - Claude and Codex rows are the same: the folder Caps found each in, a switch, and an optional nickname. Claude logins show the config folder their keychain item belongs to.
 - "Fleet" is now "total" in everything you read. Every 1.0.6 setting and alert rule is unchanged.

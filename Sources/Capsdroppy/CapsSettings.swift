@@ -45,6 +45,7 @@ struct CapsSettings: Equatable {
     static let refreshRange = 30.0...300.0
     static let thresholdRange = 50.0...100.0
     static let rearmFloor = 30.0
+    static let legacySnapshotPath = "/Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json"
 
     /// The re-arm level actually used: never at or above the threshold, or a
     /// window hovering at the threshold would fire again and again.
@@ -95,7 +96,10 @@ struct CapsSettings: Equatable {
     }
 
     @MainActor
-    static func load(from prefs: (any DropletPreferencesService)?) -> CapsSettings {
+    static func load(
+        from prefs: (any DropletPreferencesService)?,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> CapsSettings {
         var s = CapsSettings()
         guard let prefs else { return s }
         func bool(_ k: Key, _ d: Bool) -> Bool { prefs.value(forKey: k.rawValue, default: d) }
@@ -114,7 +118,11 @@ struct CapsSettings: Equatable {
         s.accountEnabled = prefs.value(forKey: Key.accountEnabled.rawValue, default: s.accountEnabled)
         s.accountNames = prefs.value(forKey: Key.accountNames.rawValue, default: s.accountNames)
         s.codexFolders = prefs.value(forKey: Key.codexFolders.rawValue, default: s.codexFolders)
-        s.snapshotPath = prefs.value(forKey: Key.snapshotPath.rawValue, default: s.snapshotPath)
+        if prefs.hasValue(forKey: Key.snapshotPath.rawValue) {
+            s.snapshotPath = prefs.value(forKey: Key.snapshotPath.rawValue, default: s.snapshotPath)
+        } else if fileExists(Self.legacySnapshotPath) {
+            s.snapshotPath = Self.legacySnapshotPath
+        }
         return s
     }
 }

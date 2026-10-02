@@ -1,6 +1,47 @@
 import Foundation
+import Combine
+import DroppyKit
 import XCTest
 @testable import Capsdroppy
+
+@MainActor
+private final class FakePreferences: DropletPreferencesService {
+    private var storage: [String: Any] = [:]
+
+    func value<Value: Codable>(forKey key: String, as type: Value.Type) -> Value? {
+        storage[key] as? Value
+    }
+
+    func setValue<Value: Codable>(_ value: Value?, forKey key: String) {
+        storage[key] = value
+    }
+
+    func hasValue(forKey key: String) -> Bool { storage[key] != nil }
+    func removeAll() { storage.removeAll() }
+    var didChange: AnyPublisher<String, Never> { Empty().eraseToAnyPublisher() }
+}
+
+final class CapsSettingsTests: XCTestCase {
+    @MainActor
+    func testUnsetSnapshotPathMigratesLeesLegacyFile() {
+        let settings = CapsSettings.load(from: FakePreferences(), fileExists: { $0 == CapsSettings.legacySnapshotPath })
+        XCTAssertEqual(settings.snapshotPath, CapsSettings.legacySnapshotPath)
+    }
+
+    @MainActor
+    func testUnsetSnapshotPathStaysEmptyWithoutLegacyFile() {
+        let settings = CapsSettings.load(from: FakePreferences(), fileExists: { _ in false })
+        XCTAssertEqual(settings.snapshotPath, "")
+    }
+
+    @MainActor
+    func testStoredEmptySnapshotPathStaysEmpty() {
+        let preferences = FakePreferences()
+        preferences.setValue("", forKey: CapsSettings.Key.snapshotPath.rawValue)
+        let settings = CapsSettings.load(from: preferences, fileExists: { _ in true })
+        XCTAssertEqual(settings.snapshotPath, "")
+    }
+}
 
 final class AlertTrackerTests: XCTestCase {
     private func row(_ id: String, seven: Double, five: Double? = nil, released: Bool? = nil) -> CapsAlertTracker.Snapshot {

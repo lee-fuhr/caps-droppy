@@ -16,7 +16,7 @@
 //  below does the same. It first shipped reading it as UTC, which put every
 //  reading 7 hours in the future and showed "no reading" (Lee, 2026-09-29).
 //
-//  No network. This droplet only ever reads this one local file.
+//  This file only reads a local file; the network lives in ClaudeUsage.swift.
 //
 
 import Foundation
@@ -29,6 +29,33 @@ public struct CapsReleaseDecision: Sendable {
     public var released: Bool?
 }
 
+/// Where an account's numbers came from.
+public enum CapsAccountKind: String, Sendable {
+    /// A row from the optional snapshot file (Advanced setting).
+    case snapshot
+    /// A Claude Code login on this Mac, read through Anthropic's usage endpoint.
+    case claude
+    /// A Codex home folder, read from its session logs.
+    case codex
+}
+
+/// Why an account has no numbers, when it has none. `ok` means it has them.
+public enum CapsAccountState: String, Sendable {
+    case ok
+    /// Waiting for the first reading.
+    case pending
+    /// The saved login has no permission to report usage (Anthropic answered 403).
+    case noUsageScope
+    /// The saved login has expired; Claude Code renews it the next time it runs.
+    case loginExpired
+    /// macOS did not allow Caps to read the saved login.
+    case accessDenied
+    /// Anthropic could not be reached, or answered with an error. Retrying.
+    case unreachable
+    /// A Codex folder with no rate-limit line in its recent logs.
+    case noActivity
+}
+
 public struct CapsAccount: Sendable, Identifiable {
     public var account: String
     public var available: Bool
@@ -37,8 +64,16 @@ public struct CapsAccount: Sendable, Identifiable {
     public var sevenDayReset: String?
     public var fiveHourReset: String?
     public var releaseDecision: CapsReleaseDecision?
+    public var kind: CapsAccountKind = .snapshot
+    /// The name the source suggests ("Claude 2", "Codex"). The user's own
+    /// name for the account, if any, wins over it.
+    public var suggestedName: String?
+    public var state: CapsAccountState = .ok
+    /// When the reading was taken (Codex: the log's own time).
+    public var seenAt: Date?
 
     public var id: String { account }
+    public var hasNumbers: Bool { sevenDayPct != nil || fiveHourPct != nil }
 }
 
 public struct CapsSnapshotFile: Sendable {
@@ -101,7 +136,10 @@ public enum CapsSnapshotLoader {
             fiveHourPct: optionalNumber(object["five_hour_pct"]),
             sevenDayReset: optionalString(object["seven_day_reset"]),
             fiveHourReset: optionalString(object["five_hour_reset"]),
-            releaseDecision: parseDecision(object["release_decision"])
+            releaseDecision: parseDecision(object["release_decision"]),
+            kind: (object["kind"] as? String).flatMap(CapsAccountKind.init(rawValue:)) ?? .snapshot,
+            suggestedName: optionalString(object["name"]),
+            state: (object["state"] as? String).flatMap(CapsAccountState.init(rawValue:)) ?? .ok
         )
     }
 
@@ -167,32 +205,46 @@ public enum CapsSnapshotLoader {
 
 // MARK: - Reading
 
-/// Reproduces `buildReading` in snapshot.ts, including the "blocked account
-/// at 100%" rule the brief states explicitly: an unavailable account whose
-/// `seven_day_pct` is already >= 100 contributes 100 to the average; any
-/// other unavailable account with no usable number contributes nothing (not
-/// zero — it is excluded, same as a missing number for an available account).
-public func capsBuildReading(_ snapshot: CapsSnapshotFile?, now: Date) -> CapsReading {
-    guard let snapshot else {
-        return CapsReading(title: "no reading", accounts: [], hasReading: false)
-    }
-
+/// The snapshot file's accounts, or none when the file is missing, malformed or
+/// older than five minutes (a stale file is no reading, as in snapshot.ts).
+public func capsSnapshotAccounts(_ snapshot: CapsSnapshotFile?, now: Date) -> [CapsAccount] {
+    guard let snapshot else { return [] }
     let age = now.timeIntervalSince(snapshot.generatedAt)
-    if age < 0 || age > capsStaleAfterSeconds {
-        return CapsReading(title: "no reading", accounts: [], hasReading: false)
-    }
+    if age < 0 || age > capsStaleAfterSeconds { return [] }
+    return snapshot.accounts
+}
 
-    let contributions: [Double] = snapshot.accounts.compactMap { account in
-        if !account.available, let pct = account.sevenDayPct, pct >= 100 { return 100 }
-        guard let pct = account.sevenDayPct else { return nil }
-        return min(100, pct)
+/// The average 7-day use that the ring and the header call the total.
+///
+/// Claude-family accounts (snapshot rows and Claude logins) make the total, with
+/// `buildReading`'s rule from snapshot.ts: an unavailable account already at 100
+/// counts as 100, and one with no number counts for nothing. Codex has its own
+/// limits, so it stays out of the total whenever a Claude-family account has a
+/// number; a Codex-only setup gets a total of its own.
+public func capsTotal(_ accounts: [CapsAccount]) -> Double? {
+    func contributions(_ list: [CapsAccount]) -> [Double] {
+        list.compactMap { account in
+            if !account.available, let pct = account.sevenDayPct, pct >= 100 { return 100 }
+            guard let pct = account.sevenDayPct else { return nil }
+            return min(100, pct)
+        }
     }
-    guard !contributions.isEmpty else {
-        return CapsReading(title: "no reading", accounts: snapshot.accounts, hasReading: false)
-    }
+    var values = contributions(accounts.filter { $0.kind != .codex })
+    if values.isEmpty { values = contributions(accounts.filter { $0.kind == .codex }) }
+    guard !values.isEmpty else { return nil }
+    return values.reduce(0, +) / Double(values.count)
+}
 
-    let usedPct = contributions.reduce(0, +) / Double(contributions.count)
-    return CapsReading(title: "\(Int(usedPct.rounded()))%", accounts: snapshot.accounts, hasReading: true)
+/// Same rule applied to a whole reading, kept for the snapshot-only path.
+public func capsBuildReading(_ snapshot: CapsSnapshotFile?, now: Date) -> CapsReading {
+    capsBuildReading(accounts: capsSnapshotAccounts(snapshot, now: now))
+}
+
+public func capsBuildReading(accounts: [CapsAccount]) -> CapsReading {
+    guard let total = capsTotal(accounts) else {
+        return CapsReading(title: "no reading", accounts: accounts, hasReading: false)
+    }
+    return CapsReading(title: "\(Int(total.rounded()))%", accounts: accounts, hasReading: true)
 }
 
 // MARK: - Taper line
@@ -275,9 +327,12 @@ private let capsAccountOrder: [String: Int] = [
     "quaternary": 4
 ]
 
-/// Reproduces `orderAccounts` in snapshot.ts.
+/// Reproduces `orderAccounts` in snapshot.ts, with snapshot rows first, then
+/// Claude logins, then Codex folders.
 public func capsOrderAccounts(_ accounts: [CapsAccount]) -> [CapsAccount] {
-    accounts.sorted { left, right in
+    func group(_ k: CapsAccountKind) -> Int { k == .snapshot ? 0 : k == .claude ? 1 : 2 }
+    return accounts.sorted { left, right in
+        if group(left.kind) != group(right.kind) { return group(left.kind) < group(right.kind) }
         let leftRank = capsAccountOrder[left.account] ?? Int.max
         let rightRank = capsAccountOrder[right.account] ?? Int.max
         if leftRank != rightRank { return leftRank < rightRank }

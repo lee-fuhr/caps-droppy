@@ -24,7 +24,7 @@ struct CapsAlert: Equatable {
 struct CapsAlertTracker {
     private var spent: [String: Bool] = [:]
     private var released: [String: Bool] = [:]
-    /// Armed once a 5-hour window fires; re-armed only after it drops below 80%,
+    /// Armed once a 5-hour window fires; re-armed only after it drops below the re-arm level (80% by default),
     /// so a window hovering around 90% does not fire again and again.
     private var fiveFired: [String: Bool] = [:]
     private var primed = false
@@ -37,9 +37,17 @@ struct CapsAlertTracker {
         var reset7: String; var reset5: String
     }
 
+    /// Drops everything remembered about one account, so it reads as new when it
+    /// returns (a hidden Codex row, switched back on, fires nothing stale).
+    mutating func forget(_ id: String) {
+        spent[id] = nil; released[id] = nil; fiveFired[id] = nil
+    }
+
     /// Alerts for this reading. The first reading after launch only records
-    /// state: starting Droppy is not an event.
-    mutating func update(_ accounts: [Snapshot]) -> [CapsAlert] {
+    /// state: starting Droppy is not an event. A 5-hour window fires at
+    /// `fiveHourThreshold` and re-arms below `rearm` (defaults 90 and 80).
+    /// Settings filter what is shown; state is recorded for every kind either way.
+    mutating func update(_ accounts: [Snapshot], fiveHourThreshold: Double = 90, rearm: Double = 80) -> [CapsAlert] {
         var alerts: [CapsAlert] = []
         for a in accounts {
             guard let seven = a.sevenDay else { continue }
@@ -61,13 +69,13 @@ struct CapsAlertTracker {
 
             if let five = a.fiveHour {
                 let fired = fiveFired[a.id] ?? false
-                if five >= 90, !fired, !isSpent {
+                if five >= fiveHourThreshold, !fired, !isSpent {
                     if primed {
                         alerts.append(CapsAlert(kind: .fiveHour, title: "\(a.name) 5-hour at \(Int(five.rounded()))%",
                                                 detail: "Resets in \(a.reset5)"))
                     }
                     fiveFired[a.id] = true
-                } else if five < 80 {
+                } else if five < rearm {
                     fiveFired[a.id] = false
                 }
             }

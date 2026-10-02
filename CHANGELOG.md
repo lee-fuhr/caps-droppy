@@ -1,5 +1,14 @@
 # Changelog
 
+## [1.0.6] - 2026-10-02
+
+- A settings page. Lee, live 2026-10-02 10:03am: 'I want to be able to easily toggle notifications on/off at least.'
+- Notifications: one master switch (off means no notch banners at all), then one switch per banner:
+  an account runs out, an account comes back, a budget hold lifts, a 5-hour window runs high.
+- The 5-hour banner's level (default 90%) and the level a window must fall below to re-arm it (default 80%).
+- Refresh rate (default 1 minute), show or hide the Codex row, show or hide the fleet gauge beside the notch.
+- Every default is what 1.0.5 did. Switching a banner back on never replays changes that happened while it was off.
+
 ## [1.0.5] - 2026-09-30
 
 - Condensed card: two lines per account. The 5-hour use sits small beside the big 7-day number.

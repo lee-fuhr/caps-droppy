@@ -40,11 +40,16 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     private var alerts = CapsAlertTracker()
     private let activitySubject = CurrentValueSubject<LiveActivityState?, Never>(nil)
 
+    private var settingsSub: AnyCancellable?
+    private var tickerSeconds: TimeInterval = 0
+    @Published private(set) var settings = CapsSettings()
+
     @Published private(set) var reading: CapsReading = CapsReading(title: "no reading", accounts: [], hasReading: false)
     @Published private(set) var codex: CodexReading?
 
     public func activate(host: DropletHost) throws {
         self.host = host
+        settings = CapsSettings.load(from: host.preferences)
         refresh()
         host.log.info("Caps activated: \(self.reading.title)")
         // Preview only: CAPS_PREVIEW_ALERT=1 shows a sample banner so its look
@@ -56,7 +61,34 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         // Once a minute, matching the brief ("refresh about once a minute").
         // Caps' own snapshot writer runs on its own cadence; this droplet only
         // ever reads, never polls faster than it needs to.
-        ticker = Timer.publish(every: 60, on: .main, in: .common)
+        scheduleTicker()
+        // A change from the settings pane (or anywhere else) applies at once.
+        settingsSub = host.preferences.didChange
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] _ in self?.settingsChanged() }
+    }
+
+    /// Writes one setting and applies it.
+    func setSetting<V: Codable>(_ key: CapsSettings.Key, _ path: WritableKeyPath<CapsSettings, V>, _ value: V) {
+        host?.preferences.setValue(value, forKey: key.rawValue)
+        var next = settings
+        next[keyPath: path] = value
+        if next != settings { settings = next; settingsChanged() }
+    }
+
+    private func settingsChanged() {
+        guard let host else { return }
+        settings = CapsSettings.load(from: host.preferences)
+        scheduleTicker()
+        refresh()
+    }
+
+    /// Default every 60 seconds, matching the brief ("refresh about once a minute").
+    private func scheduleTicker() {
+        let seconds = settings.effectiveRefresh
+        guard ticker == nil || seconds != tickerSeconds else { return }
+        tickerSeconds = seconds
+        ticker = Timer.publish(every: seconds, on: .main, in: .common)
             .autoconnect()
             .sink { [weak self] _ in self?.refresh() }
     }
@@ -64,6 +96,8 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     public func deactivate() {
         ticker?.cancel()
         ticker = nil
+        settingsSub?.cancel()
+        settingsSub = nil
         activitySubject.send(nil)
         host = nil
     }
@@ -76,7 +110,7 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
         let snapshot = CapsSnapshotLoader.load(from: path)
         let next = capsBuildReading(snapshot, now: Date())
         reading = next
-        codex = CodexReader.load()
+        codex = settings.showCodex ? CodexReader.load() : nil
         publishActivity()
         announceChanges()
         // An account coming back or running out changes the card's height.
@@ -100,7 +134,10 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
                 id: "codex", name: "Codex", sevenDay: c.pct, fiveHour: nil,
                 released: nil, ceiling: nil, reset7: capsUntil(c.resetsAt, now), reset5: "–"))
         }
-        let changes = alerts.update(rows)
+        if codex == nil { alerts.forget("codex") }
+        // The tracker records every change; settings only decide what is shown.
+        let changes = settings.filter(
+            alerts.update(rows, fiveHourThreshold: settings.fiveHourThreshold, rearm: settings.effectiveRearm))
         if !changes.isEmpty {
             capsPresent(changes, on: host.hud)
             host.log.info("Caps alert: \(changes.map(\.title).joined(separator: "; "))")
@@ -495,8 +532,8 @@ extension CapsdroppyDroplet: LiveActivityProviding {
     }
 
     private func publishActivity() {
-        guard reading.hasReading else {
-            // No guessing: withdraw the compact seat rather than showing a
+        guard reading.hasReading, settings.showGauge else {
+            // Gauge switched off in settings, or no guessing: withdraw the compact seat rather than showing a
             // gauge with nothing behind it. The shelf widget still shows the
             // words "no reading" explicitly; a two-glyph compact row has no
             // room to say that, so it says nothing instead.

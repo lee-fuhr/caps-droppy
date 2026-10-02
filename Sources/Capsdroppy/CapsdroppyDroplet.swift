@@ -88,7 +88,7 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
 
     private let keychain: any KeychainReading
     private let claude: ClaudeKeychainSource
-    private let homeDirectory: URL
+    let homeDirectory: URL
 
     public override init() {
         let preview = previewEnv["CAPS_PREVIEW_KEYCHAIN"]

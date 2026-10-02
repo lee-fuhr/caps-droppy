@@ -261,8 +261,8 @@ private struct CapsSettingsPane: View {
     }
 
     private func tilde(_ path: String) -> String {
-        let home = NSHomeDirectory()
-        return path.hasPrefix(home) ? "~" + path.dropFirst(home.count) : path
+        let home = droplet.homeDirectory.standardizedFileURL.path
+        return path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
     }
 
     var body: some View {
@@ -309,10 +309,9 @@ private struct CapsSettingsPane: View {
                         accountRow(id: home.accountID, kind: .codex, caption: tilde(home.path),
                                    removeFolder: home.isAdded ? home.path : nil)
                     }
-                    HStack {
-                        Button("Choose a folder…") { folderMessage = droplet.chooseCodexFolder() }
-                            .buttonStyle(DroppyQuietButtonStyle(size: .small))
-                        Spacer(minLength: 0)
+                    DropletControlRow(title: "Add a Codex folder", infoTip: "Pick the folder that holds Codex's sessions folder, such as one CODEX_HOME points to.") {
+                        Button("Choose…") { folderMessage = droplet.chooseCodexFolder() }
+                            .buttonStyle(.bordered).controlSize(.small)
                     }
                     DropletControlRow(title: "Or type its path") {
                         CapsCommitField(prompt: "~/.codex-work", value: "") { text in

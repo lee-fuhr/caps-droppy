@@ -19,6 +19,7 @@ let package = Package(
             name: "Capsdroppy",
             dependencies: [.product(name: "DroppyKit", package: "droppykit")]
         ),
+        .testTarget(name: "CapsdroppyTests", dependencies: ["Capsdroppy"]),
         .executableTarget(
             name: "CapsdroppyHarness",
             dependencies: [

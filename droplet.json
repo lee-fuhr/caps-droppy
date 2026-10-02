@@ -1,9 +1,9 @@
 {
   "id": "capsdroppy",
   "name": "Caps",
-  "version": "1.0.6",
-  "summary": "The fleet quota Caps already tracks, on the shelf",
-  "description": "Caps reads /Users/lee/CC/Work/LFI/_ Operations/menubar-snapshot.json, the same file Caps' menu-bar app and its Bartender line read, plus Codex's own session logs. It shows the fleet percentage as a small ring beside the notch, and a shelf card with two lines per account: name, 5-hour use and 7-day use, then a bar with the backlog cap as a tick. Hover an account for its cap in words and its reset times. A short banner drops from the notch when an account runs out or comes back, a budget hold lifts, or a 5-hour window passes 90%. Settings turn notifications on or off (all, or per alert kind), set the 5-hour alert level and re-arm level, the refresh rate, and whether the Codex row and the notch gauge show. Read-only, local files, no network, refreshed about once a minute by default.",
+  "version": "1.1.0",
+  "summary": "Your Claude and Codex limits, on the shelf",
+  "description": "Caps shows how much of your Claude and Codex limits you have used. Codex is read from its own session logs on your Mac, for any number of Codex folders. Claude is opt-in: switch it on in settings and Caps reads the Claude Code login already saved on your Mac and sends one usage request to Anthropic per refresh, from your Mac. A shelf card gives each account its 7-day use, 5-hour use and reset times, with a total as a small ring beside the notch. A short banner drops from the notch when an account runs out or comes back, or a 5-hour window runs high. Name each account, switch any off, and set the refresh rate and alert levels in settings. Advanced: point Caps at a snapshot file to show accounts from another tool.",
   "category": "Productivity",
   "kit": {
     "abi": 1,
@@ -12,7 +12,8 @@
   "minAppVersion": "16.0.1",
   "capabilities": [
     "shelf-write",
-    "hud"
+    "hud",
+    "network-client"
   ],
   "surfaces": [
     "shelf-widget",
@@ -33,9 +34,10 @@
   "screenshots": [],
   "keywords": [
     "claude",
+    "codex",
     "quota",
     "usage",
-    "caps",
-    "fleet"
+    "limits",
+    "caps"
   ]
 }

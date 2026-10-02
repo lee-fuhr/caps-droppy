@@ -16,6 +16,7 @@
 //  claude.ai web session, and Caps has no claude.ai sign-in of any kind.
 //
 
+import CryptoKit
 import Foundation
 import Security
 
@@ -90,6 +91,42 @@ func capsClaudeNames(_ services: [String]) -> [String: String] {
 }
 
 func capsClaudeAccountID(_ service: String) -> String { "claude:\(service)" }
+
+/// Claude Code names a login's keychain item "Claude Code-credentials" for its
+/// default folder (~/.claude) and "Claude Code-credentials-<8 hex>" for any other
+/// config folder, where the 8 hex are the start of the SHA-256 of that folder's
+/// absolute path. Checked against a real login on this Mac: "6c917058" is
+/// sha256("/Users/lee/.claude-slide").
+func capsClaudeSuffix(forFolder path: String) -> String {
+    SHA256.hash(data: Data(path.utf8)).map { String(format: "%02x", $0) }.joined().prefix(8).description
+}
+
+/// The config folders worth hashing: every ".claude*" folder in the home folder,
+/// the folders inside those (people keep one per account in a parent), and
+/// CLAUDE_CONFIG_DIR.
+func capsClaudeCandidateFolders(home: URL, environment: [String: String] = ProcessInfo.processInfo.environment) -> [String] {
+    let fm = FileManager.default
+    func isDir(_ p: String) -> Bool { var d: ObjCBool = false; return fm.fileExists(atPath: p, isDirectory: &d) && d.boolValue }
+    var out: [String] = []
+    for name in ((try? fm.contentsOfDirectory(atPath: home.path)) ?? []).sorted() where name.hasPrefix(".claude") {
+        let path = home.appendingPathComponent(name).path
+        guard isDir(path) else { continue }
+        out.append(path)
+        for child in ((try? fm.contentsOfDirectory(atPath: path)) ?? []).sorted() where !child.hasPrefix(".") {
+            let sub = path + "/" + child
+            if isDir(sub) { out.append(sub) }
+        }
+    }
+    if let env = environment["CLAUDE_CONFIG_DIR"], !env.isEmpty { out.append((env as NSString).expandingTildeInPath) }
+    return out
+}
+
+/// The folder a keychain item belongs to, or nil when no candidate matches.
+func capsClaudeFolder(service: String, candidates: [String], home: URL) -> String? {
+    if service == claudeServicePrefix { return home.appendingPathComponent(".claude").path }
+    let suffix = String(service.dropFirst(claudeServicePrefix.count + 1))
+    return candidates.first { capsClaudeSuffix(forFolder: $0) == suffix }
+}
 
 // MARK: - Network
 

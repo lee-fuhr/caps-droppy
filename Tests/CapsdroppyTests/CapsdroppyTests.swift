@@ -204,3 +204,83 @@ final class RealPathTests: XCTestCase {
         XCTAssertNotNil(rows.first)
     }
 }
+
+final class PaceTests: XCTestCase {
+    private let now = Date(timeIntervalSince1970: 1_800_000_000)
+    private let day: TimeInterval = 86_400
+
+    /// A window whose reset is `left` seconds away: it has run for 7 days minus `left`.
+    private func pace(used: Double, left: TimeInterval) -> CapsPace? {
+        capsPace(used: used, resetsAt: now.addingTimeInterval(left), now: now)
+    }
+
+    func testMissingOrPastResetHasNoPace() {
+        XCTAssertNil(capsPace(used: 50, resetsAt: nil, now: now))
+        XCTAssertNil(capsPace(used: 50, resetsAt: now.addingTimeInterval(-60), now: now))
+        XCTAssertNil(capsPace(used: 50, resetsAt: now, now: now))
+    }
+
+    func testWindowBoundaries() {
+        // Reset a full week away: the window has just started.
+        let start = pace(used: 10, left: 7 * day)
+        XCTAssertEqual(start?.elapsed ?? -1, 0, accuracy: 1e-9)
+        XCTAssertEqual(start?.tooEarly, true)
+        XCTAssertEqual(start?.isAhead, false)
+        // Reset a second away: the window is over.
+        XCTAssertEqual(pace(used: 10, left: 1)?.elapsed ?? 0, 1, accuracy: 1e-5)
+        // A reset more than a week away (clock skew) clamps to the start.
+        XCTAssertEqual(pace(used: 10, left: 9 * day)?.elapsed, 0)
+    }
+
+    func testAheadOfPaceProjectsRunOut() {
+        let p = pace(used: 80, left: 3.5 * day)!      // half through, 80% used
+        XCTAssertEqual(p.tickPct, 50, accuracy: 1e-9)
+        XCTAssertTrue(p.isAhead)
+        // 80% in 3.5 days reaches 100% at 4.375 days, 2.625 days before the reset.
+        XCTAssertEqual(p.resetsAt.timeIntervalSince(p.runsOutAt!), 2.625 * day, accuracy: 1)
+    }
+
+    func testBehindAndExactlyOnPaceAreNotAhead() {
+        XCTAssertFalse(pace(used: 30, left: 3.5 * day)!.isAhead)
+        XCTAssertNil(pace(used: 30, left: 3.5 * day)!.runsOutAt)
+        XCTAssertFalse(pace(used: 50, left: 3.5 * day)!.isAhead)   // a steady pace lands exactly on the reset
+    }
+
+    func testZeroAndFullBars() {
+        let zero = pace(used: 0, left: 3 * day)!
+        XCTAssertFalse(zero.isAhead)
+        XCTAssertNil(zero.runsOutAt)
+        let full = pace(used: 100, left: 3 * day)!
+        XCTAssertTrue(full.isSpent)
+        XCTAssertFalse(full.isAhead)
+        XCTAssertEqual(capsPaceSentence(full, compact: false), "")
+        XCTAssertEqual(pace(used: 140, left: 3 * day)?.used, 100)   // clamped
+    }
+
+    func testTooEarlyNeverProjects() {
+        let p = pace(used: 50, left: 7 * day - 5 * 3_600)!   // five hours in, half used
+        XCTAssertTrue(p.tooEarly)
+        XCTAssertFalse(p.isAhead)
+        XCTAssertNil(p.runsOutAt)
+    }
+
+    func testSentences() {
+        XCTAssertTrue(capsPaceSentence(pace(used: 80, left: 3.5 * day)!, compact: false).hasPrefix("ahead of pace, runs out ~"))
+        XCTAssertTrue(capsPaceSentence(pace(used: 30, left: 3.5 * day)!, compact: false).hasPrefix("on pace, resets "))
+    }
+}
+
+final class ClaudeFolderTests: XCTestCase {
+    func testSuffixIsTheStartOfTheFolderPathHash() {
+        // Measured on a real Claude Code login: its keychain item ends 6c917058.
+        XCTAssertEqual(capsClaudeSuffix(forFolder: "/Users/lee/.claude-slide"), "6c917058")
+    }
+
+    func testMapsAServiceToItsFolder() {
+        let home = URL(fileURLWithPath: "/Users/lee")
+        let candidates = ["/Users/lee/.claude", "/Users/lee/.claude-slide", "/Users/lee/.claude-work"]
+        XCTAssertEqual(capsClaudeFolder(service: "Claude Code-credentials", candidates: candidates, home: home), "/Users/lee/.claude")
+        XCTAssertEqual(capsClaudeFolder(service: "Claude Code-credentials-6c917058", candidates: candidates, home: home), "/Users/lee/.claude-slide")
+        XCTAssertNil(capsClaudeFolder(service: "Claude Code-credentials-deadbeef", candidates: candidates, home: home))
+    }
+}

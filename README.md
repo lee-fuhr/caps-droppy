@@ -7,6 +7,8 @@ shelf and beside the notch. Built with [DroppyKit](https://getdroppy.app/docs/dr
 
 - A shelf card with one row per account: 7-day use as the big number and a bar, 5-hour use
   beside it, and the reset times when you hover a row.
+- A small triangle on every 7-day bar marks where a steady pace would have you by now. Fill past it
+  means you are on course to run out before the reset; hover a row for when.
 - A total (the average 7-day use) as a small ring and percentage beside the notch.
 - A short banner from the notch when an account runs out or comes back, or a 5-hour window
   runs high. Each banner can be switched off, and so can all of them.

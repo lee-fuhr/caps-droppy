@@ -74,6 +74,8 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
     /// Found on this Mac, shown in settings whether or not they are switched on.
     @Published private(set) var codexHomes: [CodexHome] = []
     @Published private(set) var claudeServices: [String] = []
+    /// The config folder each Claude login belongs to, where it can be worked out.
+    @Published private(set) var claudeFolders: [String: String] = [:]
     /// True when any account carries a release_decision (a snapshot with budget holds).
     @Published private(set) var hasBudgetHolds = false
 
@@ -245,6 +247,10 @@ public final class CapsdroppyDroplet: NSObject, ObservableObject, Droplet {
                 let found = await Task.detached(priority: .utility) { keychain.claudeServices() }.value
                 guard let self, !Task.isCancelled else { return }
                 self.claudeServices = found
+                let candidates = capsClaudeCandidateFolders(home: self.homeDirectory)
+                self.claudeFolders = Dictionary(uniqueKeysWithValues: found.compactMap { service in
+                    capsClaudeFolder(service: service, candidates: candidates, home: self.homeDirectory).map { (service, $0) }
+                })
                 self.lastDiscovery = Date()
             }
             guard let self, !Task.isCancelled else { return }
@@ -448,6 +454,10 @@ func capsShortName(_ account: String) -> String {
 }
 
 /// "5d 8h", "14h", "13m": time until a reset, largest two units.
+func capsDate(_ raw: String) -> Date? {
+    CapsSnapshotLoader.parseSnapshotTimestamp(raw) ?? ISO8601DateFormatter().date(from: raw)
+}
+
 func capsUntil(_ raw: String?, _ now: Date) -> String {
     guard let raw, let date = CapsSnapshotLoader.parseSnapshotTimestamp(raw) ?? ISO8601DateFormatter().date(from: raw) else { return "–" }
     return capsUntil(date, now)
@@ -497,10 +507,33 @@ private struct CapsTick: View {
     }
 }
 
+/// A 6 x 4 triangle pointing down at the bar: where a steady pace would be by now.
+struct CapsPaceMark: View {
+    var body: some View {
+        Path { p in
+            p.move(to: CGPoint(x: 0, y: 0)); p.addLine(to: CGPoint(x: 6, y: 0)); p.addLine(to: CGPoint(x: 3, y: 4)); p.closeSubpath()
+        }
+        .fill(t1.opacity(0.85))
+        .frame(width: 6, height: 4)
+    }
+}
+
+/// The 7-day bar's colour. With a pace to compare against: calm at or under it,
+/// warm once past it, hot near the top. Without one (no reset known): by fullness.
+func capsPaceTone(_ pct: Double, _ pace: CapsPace?) -> Color {
+    guard let pace else { return tone(pct) }
+    if pct >= 90 { return hot }
+    return pace.isAhead ? warm : calm
+}
+
 /// 7-day bar, full width, 8pt, with the budget tick cut into it. The cut is a
 /// real gap in the bar, not black paint, so it reads on any background.
 private struct CapsMeter: View {
     let pct: Double; let ceiling: Double?; let open: Bool
+    /// Where a steady pace would have the bar by now, 0...1, or nil with no reset to measure from.
+    var pace: Double? = nil
+    /// The fill's colour: by pace when there is one, else by how full the bar is.
+    var fill: Color? = nil
     var body: some View {
         GeometryReader { g in
             let w = g.size.width
@@ -508,7 +541,7 @@ private struct CapsMeter: View {
                 ZStack(alignment: .leading) {
                     Capsule().fill(Color.white.opacity(0.12)).frame(height: 8)
                     if pct > 0 {
-                        Capsule().fill(tone(pct)).frame(width: max(4, w * min(1, pct / 100)), height: 8)
+                        Capsule().fill(fill ?? tone(pct)).frame(width: max(4, w * min(1, pct / 100)), height: 8)
                     }
                     if let c = ceiling, c > 0, c < 100 {
                         Rectangle().frame(width: 4, height: 8).offset(x: w * c / 100 - 2).blendMode(.destinationOut)
@@ -517,6 +550,11 @@ private struct CapsMeter: View {
                 .compositingGroup()
                 if let c = ceiling, c > 0, c < 100 {
                     CapsTick(open: open).offset(x: w * c / 100 - 1)
+                }
+                // The pace mark: a small triangle on the bar's top edge, a different
+                // shape from the budget tick so the two never read as one.
+                if let pace {
+                    CapsPaceMark().offset(x: w * pace - 3, y: -7)
                 }
             }
         }
@@ -559,6 +597,7 @@ private struct CapsRow: View {
     /// Beside the service's mark; nil when the mark alone says which account it is.
     let name: String?; let pct: Double?; let fivePct: Double?
     let ceiling: Double?; let open: Bool
+    var pace: CapsPace? = nil
     var state: CapsAccountState = .ok
     var spentBack: String? = nil
     var readAge: String? = nil
@@ -589,7 +628,7 @@ private struct CapsRow: View {
             if spentBack != nil {
                 Capsule().fill(hot.opacity(0.55)).frame(height: 8)
             } else if let big {
-                CapsMeter(pct: big, ceiling: ceiling, open: open)
+                CapsMeter(pct: big, ceiling: ceiling, open: open, pace: pct == nil ? nil : pace?.elapsed, fill: pct == nil ? nil : capsPaceTone(big, pace))
             } else {
                 Capsule().fill(Color.white.opacity(0.06)).frame(height: 8)
             }
@@ -645,7 +684,8 @@ private struct CapsShelfWidget: View {
                     CapsRow(
                         id: a.account, kind: a.kind, name: droplet.cardName(for: a), pct: a.sevenDayPct,
                         fivePct: a.fiveHourPct, ceiling: a.releaseDecision?.ceilingPct,
-                        open: a.releaseDecision?.released == true, state: a.state,
+                        open: a.releaseDecision?.released == true,
+                        pace: capsPace(used: a.sevenDayPct ?? 0, resetsAt: a.sevenDayReset.flatMap(capsDate), now: now), state: a.state,
                         spentBack: spent ? capsUntil(a.sevenDayReset, now) : nil,
                         readAge: a.kind == .codex ? a.seenAt.map { capsAgo($0, now) } : nil,
                         hovered: $hovered, compact: context.isCompact
@@ -709,14 +749,15 @@ private struct CapsShelfWidget: View {
             if let id = hovered, let a = accounts.first(where: { $0.account == id }) {
                 detail(a, now: now, compact: compact)
             } else if droplet.hasBudgetHolds {
-                // The key: both ticks exactly as they sit on a bar.
-                specimen(open: true)
+                // The key: the pace mark, then both budget ticks exactly as they sit on a bar.
+                CapsPaceMark(); Text("pace").foregroundStyle(t3)
+                specimen(open: true).padding(.leading, 8)
                 Text("backlog open").foregroundStyle(t3)
                 specimen(open: false).padding(.leading, 8)
                 Text(compact ? "held" : "held for clients").foregroundStyle(t3)
-                if !compact { Text("· hover a row").foregroundStyle(t3).padding(.leading, 4) }
             } else {
-                Text(compact ? "Hover a row" : "Hover a row for reset times").foregroundStyle(t3)
+                CapsPaceMark()
+                Text(compact ? "steady pace" : "where a steady pace would be · hover a row").foregroundStyle(t3)
             }
             Spacer(minLength: 0)
         }
@@ -764,7 +805,10 @@ private struct CapsShelfWidget: View {
              + Text("  back in \(capsUntil(a.sevenDayReset, now))").foregroundColor(t3))
         } else {
             // Two groups, 2 spaces apart: what it is, then when each window resets.
-            let times = resetText(a, now: now, compact: compact)
+            let pace = capsPace(used: a.sevenDayPct ?? 0, resetsAt: a.sevenDayReset.flatMap(capsDate), now: now)
+            // With a 7-day reset the line says how the pace stands; otherwise just the reset times.
+            let times = pace.map { Text("  " + capsPaceSentence($0, compact: compact)).foregroundColor($0.isAhead ? warm : t3) }
+                ?? resetText(a, now: now, compact: compact)
             if let d = a.releaseDecision, let c = d.ceilingPct, (d.hoursToReset ?? 0) > 0 {
                 let cap = Int(min(100, max(0, c)).rounded())
                 tickSlot(d.released == true)

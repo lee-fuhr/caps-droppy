@@ -171,17 +171,20 @@ private struct CapsCommitField: View {
     }
 }
 
-/// The full disclosure for the Claude switch, one step from the pane.
+/// The full disclosure for the Claude switch, one step from the pane. Plain
+/// paragraphs under headings: no boxes inside boxes.
 private struct CapsClaudeDetailsPage: View {
     private func block(_ title: String, _ lines: [String]) -> some View {
         DropletSettingsSection {
-            settingsSectionHeader(LocalizedStringKey(title))
-        } content: {
-            DropletSettingsCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(title).font(.headline).foregroundStyle(.primary)
                 ForEach(lines, id: \.self) { line in
-                    Text(line).font(.body).fixedSize(horizontal: false, vertical: true)
+                    Text(line).font(.body).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
                 }
             }
+            .padding(.bottom, 8)
+        } content: {
+            EmptyView()
         }
     }
 
@@ -238,19 +241,21 @@ private struct CapsSettingsPane: View {
         s < 60 ? "\(Int(s)) sec" : s.truncatingRemainder(dividingBy: 60) == 0 ? "\(Int(s / 60)) min" : "\(Int(s / 60)) min \(Int(s) % 60) sec"
     }
 
-    /// One account, a real row: the service's mark, its name (optional when it
-    /// is the only one of its service) and its switch.
-    private func accountRow(id: String, kind: CapsAccountKind, caption: String, removeFolder: String? = nil) -> some View {
-        let several = droplet.serviceCount(kind) > 1
-        return Toggle(isOn: enabled(id)) {
-            HStack(alignment: .center, spacing: 8) {
-                CapsServiceIcon(kind: kind, size: 16).foregroundStyle(.secondary).frame(width: 20)
-                VStack(alignment: .leading, spacing: 2) {
-                    TextField("", text: name(id), prompt: Text(several ? "Name this account" : "\(droplet.serviceWord(kind)) (add a name if you like)"))
-                        .labelsHidden().textFieldStyle(.roundedBorder).frame(maxWidth: 260)
-                    Text(caption).font(.caption).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+    /// One account, a real row, the same for Claude and Codex: the service's mark
+    /// and the folder Caps found it in (its identity), a quiet nickname field
+    /// beneath, and the switch. The nickname only changes what the card calls it.
+    private func accountRow(id: String, kind: CapsAccountKind, primary: String, caption: String? = nil, removeFolder: String? = nil) -> some View {
+        Toggle(isOn: enabled(id)) {
+            HStack(alignment: .top, spacing: 8) {
+                CapsServiceIcon(kind: kind, size: 16).foregroundStyle(.secondary).frame(width: 20).padding(.top, 1)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(primary).lineLimit(1).truncationMode(.middle)
+                    if let caption { Text(caption).font(.caption).foregroundStyle(.secondary).lineLimit(2) }
+                    TextField("", text: name(id), prompt: Text("Nickname (optional)"))
+                        .labelsHidden().textFieldStyle(.roundedBorder).controlSize(.small).frame(maxWidth: 200)
                 }
                 if let removeFolder {
+                    Spacer(minLength: 0)
                     Button { droplet.removeCodexFolder(removeFolder) } label: { Image(systemName: "minus") }
                         .buttonStyle(DroppyCircleButtonStyle(size: 22, destructive: true, solidFill: nil, foregroundColorOverride: nil))
                         .help("Stop reading this folder")
@@ -261,8 +266,12 @@ private struct CapsSettingsPane: View {
     }
 
     private func tilde(_ path: String) -> String {
-        let home = droplet.homeDirectory.standardizedFileURL.path
-        return path == home ? "~" : path.hasPrefix(home + "/") ? "~" + path.dropFirst(home.count) : path
+        // The home folder may be spelled with or without a /private prefix.
+        for home in [droplet.homeDirectory.path, droplet.homeDirectory.standardizedFileURL.path] {
+            if path == home { return "~" }
+            if path.hasPrefix(home + "/") { return "~" + path.dropFirst(home.count) }
+        }
+        return path
     }
 
     var body: some View {
@@ -284,12 +293,24 @@ private struct CapsSettingsPane: View {
                     DropletSettingsPageLink("What Caps reads and sends", subtitle: "The full detail, including what it never does.", page: "claude-details") {
                         Image(systemName: "info.circle").font(.system(size: 16)).foregroundStyle(.secondary)
                     }
+                }
+            }
+
+            DropletSettingsSection {
+                VStack(alignment: .leading, spacing: 2) {
+                    settingsSectionHeader("Claude Code logins")
+                    capsNote("Found automatically on this Mac, in the keychain. Each shows the config folder it belongs to.")
+                }
+            } content: {
+                DropletSettingsCard {
                     if droplet.claudeServices.isEmpty {
                         capsNote("No Claude Code login found on this Mac. Sign in to Claude Code and it will show up here.")
                     }
                     ForEach(droplet.claudeServices, id: \.self) { service in
+                        let folder = droplet.claudeFolders[service]
                         accountRow(id: capsClaudeAccountID(service), kind: .claude,
-                                   caption: service == claudeServicePrefix ? "Claude Code login" : "Claude Code login (another config folder)")
+                                   primary: folder.map(tilde) ?? "Claude Code login",
+                                   caption: folder == nil ? "macOS keychain item \u{201C}\(service)\u{201D}; its config folder could not be worked out" : nil)
                             .disabled(!optedIn)
                     }
                 }
@@ -297,8 +318,8 @@ private struct CapsSettingsPane: View {
 
             DropletSettingsSection {
                 VStack(alignment: .leading, spacing: 2) {
-                    settingsSectionHeader("Codex")
-                    capsNote("Reads Codex's own session logs on this Mac. Nothing is sent anywhere.")
+                    settingsSectionHeader("Codex folders")
+                    capsNote("Found automatically on this Mac (~/.codex and any ~/.codex-* beside it). Caps reads only their session logs; nothing is sent anywhere.")
                 }
             } content: {
                 DropletSettingsCard {
@@ -306,7 +327,8 @@ private struct CapsSettingsPane: View {
                         capsNote("No Codex folder found. Caps looks in ~/.codex. If you keep Codex somewhere else (CODEX_HOME) or use a second Codex login, add that folder below.")
                     }
                     ForEach(droplet.codexHomes, id: \.path) { home in
-                        accountRow(id: home.accountID, kind: .codex, caption: tilde(home.path),
+                        accountRow(id: home.accountID, kind: .codex, primary: tilde(home.path),
+                                   caption: home.isAdded ? "Added by you" : nil,
                                    removeFolder: home.isAdded ? home.path : nil)
                     }
                     DropletControlRow(title: "Add a Codex folder", infoTip: "Pick the folder that holds Codex's sessions folder, such as one CODEX_HOME points to.") {
@@ -323,26 +345,24 @@ private struct CapsSettingsPane: View {
                 }
             }
 
-            DropletSettingsCard {
-                DropletToggleRow(
-                    title: "Notifications",
-                    subtitle: "Banners that drop from the notch when something changes. Off means none at all.",
-                    isOn: bool(.notifications, \.notifications)
-                )
-            }
-
             DropletSettingsSection {
-                settingsSectionHeader("Banners for")
+                VStack(alignment: .leading, spacing: 2) {
+                    settingsSectionHeader("Notifications")
+                    capsNote("For every account together. Banners that drop from the notch when something changes.")
+                }
             } content: {
                 DropletSettingsCard {
-                    DropletToggleRow(title: "An account runs out", isOn: bool(.alertFull, \.alertFull))
-                    DropletToggleRow(title: "An account comes back", isOn: bool(.alertBack, \.alertBack))
-                    if droplet.hasBudgetHolds {
-                        DropletToggleRow(title: "A budget hold lifts", isOn: bool(.alertOpened, \.alertOpened))
+                    DropletToggleRow(title: "Show banners", isOn: bool(.notifications, \.notifications))
+                    Group {
+                        DropletToggleRow(title: "An account runs out", isOn: bool(.alertFull, \.alertFull))
+                        DropletToggleRow(title: "An account comes back", isOn: bool(.alertBack, \.alertBack))
+                        if droplet.hasBudgetHolds {
+                            DropletToggleRow(title: "A budget hold lifts", isOn: bool(.alertOpened, \.alertOpened))
+                        }
+                        DropletToggleRow(title: "A 5-hour window runs high", isOn: bool(.alertFiveHour, \.alertFiveHour))
                     }
-                    DropletToggleRow(title: "A 5-hour window runs high", isOn: bool(.alertFiveHour, \.alertFiveHour))
+                    .disabled(!s.notifications)
                 }
-                .disabled(!s.notifications)
             }
 
             DropletSettingsSection {
